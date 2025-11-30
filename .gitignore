@@ -1,0 +1,45 @@
+# .gitignore
+
+# Build results
+bin/
+obj/
+*.dll
+*.exe
+*.so
+*.dylib
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln.docstates
+.idea/
+*.swp
+*.swo
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+
+# Testing
+TestResults/
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local files
+appsettings.*.json
+*.log
+
+# NuGet
+packages/
+.nuget/NuGet.exe
+.nuget/packages/
+.nuget/NuGetScratch/
+
+# Backup files
+MigrationsBackup_*/
