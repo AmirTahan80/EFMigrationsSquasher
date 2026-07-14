@@ -96,30 +96,6 @@ Verify that the migration ID in `UpdateExistingDatabases.sql` exactly matches th
 
 Issues and pull requests are welcome.
 
-## Publishing to NuGet
-
-Releases are published by [the trusted-publishing workflow](.github/workflows/publish-nuget.yml) when a semantic-version tag such as `v1.1.1` is pushed. The tag version becomes the NuGet package version.
-
-Configure a trusted publishing policy in your nuget.org account with:
-
-- Repository owner: `AmirTahan80`
-- Repository: `EFMigrationsSquasher`
-- Workflow file: `publish-nuget.yml`
-- Environment: leave empty
-
-Add a GitHub Actions repository secret named `NUGET_USER` containing your nuget.org username (profile name, not email). No long-lived NuGet API key is required.
-
-After merging a release change, publish it with:
-
-```bash
-git switch main
-git pull
-git tag -a v1.1.1 -m "Release v1.1.1"
-git push origin v1.1.1
-```
-
-The version tag must not already exist, and its version should match the intended changelog release.
-
 ## License
 
 Licensed under the [MIT License](LICENSE).
