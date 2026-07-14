@@ -1,0 +1,63 @@
+name: Publish to NuGet
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate tag and set package version
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag must be a semantic version such as v1.1.1 or v1.2.0-preview.1"
+            exit 1
+          fi
+          echo "PACKAGE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore DotnetEfMigrationsSquashTool.sln
+
+      - name: Build
+        run: dotnet build DotnetEfMigrationsSquashTool.sln --configuration Release --no-restore
+
+      - name: Pack
+        run: >-
+          dotnet pack DotnetEfMigrationsSquashTool/DotnetEfMigrationsSquashTool.csproj
+          --configuration Release
+          --no-build
+          --output artifacts
+          -p:PackageVersion=${{ env.PACKAGE_VERSION }}
+
+      - name: Get temporary NuGet API key
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Publish package
+        run: >-
+          dotnet nuget push
+          "artifacts/EFMigrationsSquasher.${{ env.PACKAGE_VERSION }}.nupkg"
+          --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
