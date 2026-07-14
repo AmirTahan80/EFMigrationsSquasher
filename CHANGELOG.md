@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-14
+
+### Changed
+- Target .NET 10 and EF Core 10.0.3
+- Package the application as a .NET global tool with the documented command name
+- Refresh installation, usage, and safety documentation
+
+### Fixed
+- Return a non-zero process exit code for invalid input and runtime failures
+- Use the same migration ID in generated C# and SQL files
+- Preserve model snapshot namespaces instead of hard-coding the sample project namespace
+- Prevent backup migration files from being compiled by SDK-style projects
+- Override the sample app's vulnerable transitive Microsoft.OpenApi dependency
+- Correct package author references and corrupted README text
+
 ## [1.0.0] - 2025-12-01
 
 ### Added

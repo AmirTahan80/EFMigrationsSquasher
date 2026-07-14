@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using System.Text.RegularExpressions;
 
 namespace EfMigrationSquasher
 {
@@ -43,14 +44,14 @@ namespace EfMigrationSquasher
                 var name = parseResult.GetValue(nameOption);
                 var dryRun = parseResult.GetValue(dryRunOption);
 
-                await SquashMigrationsAsync(project!, context!, name!, dryRun);
+                return await SquashMigrationsAsync(project!, context!, name!, dryRun);
             });
 
             ParseResult parseResult = rootCommand.Parse(args);
             return await parseResult.InvokeAsync();
         }
 
-        static async Task SquashMigrationsAsync(string projectPath, string contextName, string migrationName, bool dryRun)
+        static async Task<int> SquashMigrationsAsync(string projectPath, string contextName, string migrationName, bool dryRun)
         {
             try
             {
@@ -64,15 +65,22 @@ namespace EfMigrationSquasher
                 if (!File.Exists(projectPath))
                 {
                     Console.WriteLine($"❌ Project file not found: {projectPath}");
-                    return;
+                    return 1;
                 }
 
-                if (!projectPath.EndsWith(".csproj"))
+                if (!projectPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
                 {
                     Console.WriteLine($"❌ Invalid project file. Must be a .csproj file: {projectPath}");
                     Console.WriteLine($"   You provided: {projectPath}");
                     Console.WriteLine($"   Example: --project \"./MyApp/MyApp.csproj\"");
-                    return;
+                    return 1;
+                }
+
+                if (!Regex.IsMatch(migrationName, @"^[_\p{L}][\p{L}\p{Nd}_]*$"))
+                {
+                    Console.WriteLine($"❌ Invalid migration name: {migrationName}");
+                    Console.WriteLine("   Use a valid C# identifier, for example: ConsolidatedMigration");
+                    return 1;
                 }
 
                 Console.WriteLine("✅ Project file found!");
@@ -87,11 +95,14 @@ namespace EfMigrationSquasher
                 {
                     await migrationSquasher.SquashMigrationsAsync(migrationName);
                 }
+
+                return 0;
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ Error: {ex.Message}");
                 Console.WriteLine($"🔍 Stack trace: {ex.StackTrace}");
+                return 1;
             }
         }
     }
