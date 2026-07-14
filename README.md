@@ -1,146 +1,101 @@
 # EF Core Migrations Squasher
 
-A powerful CLI tool to consolidate multiple Entity Framework Core migrations into a single migration. Perfect for cleaning up your migration history while maintaining full schema integrity and rollback capability.
+A .NET 10 command-line tool that consolidates multiple Entity Framework Core migrations into one migration while preserving their `Up` and `Down` operations.
 
 ## Features
 
-✨ **Consolidate Migrations** - Combine multiple migrations into one clean migration  
-🔄 **Smart Down Methods** - Automatically extracts or generates proper rollback operations  
-💾 **Automatic Backup** - Creates timestamped backups before any modifications  
-📊 **SQL Scripts** - Generates database update scripts for existing databases  
-✅ **Comprehensive** - Handles CreateTable, AddColumn, CreateIndex, and more  
-🎯 **Easy to Use** - Simple CLI interface with clear feedback  
+- Combines migrations in chronological order
+- Combines rollback operations in reverse chronological order
+- Creates a timestamped backup before changing migration files
+- Supports a dry run that makes no changes
+- Generates a SQL Server script for updating the history of an existing database
+- Preserves the current model snapshot in the generated designer file
+
+## Requirements
+
+- .NET 10 SDK
+- An EF Core 10 project with conventional timestamp-prefixed migrations in a `Migrations` folder
 
 ## Installation
 
-### As a CLI Tool (Global Install)
+Install the package as a global .NET tool:
 
 ```bash
 dotnet tool install --global EFMigrationsSquasher
 ```
 
-### As a NuGet Package
+To install a locally packed build:
 
 ```bash
-dotnet add package EFMigrationsSquasher
+dotnet pack DotnetEfMigrationsSquashTool/DotnetEfMigrationsSquashTool.csproj
+dotnet tool install --global --add-source DotnetEfMigrationsSquashTool/bin/Release EFMigrationsSquasher
 ```
 
-## Quick Start
+## Usage
 
-### Basic Usage
+Preview the operation first:
 
 ```bash
-ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "MyDbContext" --name "ConsolidatedMigration"
+ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbContext" --dry-run
 ```
 
-### Options
-
-- `--project` (required): Path to your .csproj file
-- `--context` (required): Your DbContext class name
-- `--name` (optional): Name for the new migration (default: "ConsolidatedMigration")
-- `--dry-run` (optional): Preview changes without applying them
-
-### Example
+Create the consolidated migration:
 
 ```bash
-# Preview what would happen
-ef-migrations-squash --project "./Data/AppContext.csproj" --context "ApplicationDbContext" --dry-run
-
-# Actually perform the squash
-ef-migrations-squash --project "./Data/AppContext.csproj" --context "ApplicationDbContext" --name "InitialSchema"
+ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbContext" --name "InitialSchema"
 ```
 
-## How It Works
+Options:
 
-1. **Backup Creation** - Creates a timestamped backup of all migration files
-2. **Schema Extraction** - Extracts all `Up` methods from existing migrations in chronological order
-3. **Down Method Extraction** - Extracts actual `Down` methods or auto-generates inverse operations
-4. **File Cleanup** - Removes old migration files
-5. **Consolidation** - Creates a new migration with combined Up/Down logic
-6. **Database Script** - Generates SQL for updating existing databases
+- `--project` (required): path to the project containing the migrations
+- `--context` (required): `DbContext` class name used in the generated designer
+- `--name`: consolidated migration class name; defaults to `ConsolidatedMigration`
+- `--dry-run`: lists affected files without changing them
 
-## Supported Operations
+## What changes
 
-The tool automatically handles:
+Given:
 
-- ✅ `CreateTable` / `DropTable`
-- ✅ `AddColumn` / `DropColumn`
-- ✅ `CreateIndex` / `DropIndex`
-- ✅ Foreign Keys and Constraints
-- ✅ Custom property configurations
-
-## Example
-
-### Before (Multiple Migrations)
-```
+```text
 Migrations/
-  20251122201757_init.cs
+  20251122201757_Initial.cs
   20251122201820_AddUserAge.cs
-  20251122201836_AddProductDescription.cs
-  20251122201844_AddUserEmailIndex.cs
+  AppDbContextModelSnapshot.cs
 ```
 
-### After (Consolidated)
-```
-Migrations/
-  20251130223219_ConsolidatedMigration.cs (contains all operations)
-  20251130223219_ConsolidatedMigration.Designer.cs
-  TestDbContextModelSnapshot.cs
-```
+the tool:
 
-## Important Notes
+1. Copies the migration C# files into `MigrationsBackup_<timestamp>` as `.cs.bak` files so SDK compile globs ignore them.
+2. Extracts `Up` operations in chronological order.
+3. Extracts `Down` operations in reverse chronological order.
+4. Removes the old migration and designer files, but keeps the model snapshot.
+5. Writes one migration and designer file with a shared migration ID.
+6. Writes `Migrations/UpdateExistingDatabases.sql` for SQL Server databases that already contain the schema.
 
-⚠️ **Always backup your project first** - While the tool creates automatic backups, ensure you have your own backup  
-⚠️ **Test thoroughly** - Test the consolidated migration on a development database before production  
-⚠️ **Review generated code** - Check the generated migration file to ensure it matches your schema  
-⚠️ **Existing databases** - Use the generated `UpdateExistingDatabases.sql` script to update migration history  
+## Safety notes
 
-## For Existing Databases
+Migration squashing rewrites migration history. Commit or independently back up the project first, inspect the generated C# and SQL, and test against disposable new and existing databases before production.
 
-After running the squash tool:
-
-1. A file `UpdateExistingDatabases.sql` is generated in your Migrations folder
-2. This script updates the EF Core migration history table for existing databases
-3. New databases will automatically use the consolidated migration
-
-```sql
--- Example: Run this on your existing databases
-UPDATE __EFMigrationsHistory 
-SET MigrationId = 'your_new_migration_id'
-WHERE MigrationId IN ('old_migration_1', 'old_migration_2', ...);
-```
+The generated history script is intentionally conservative: its deletion statement remains commented out. Review and adapt it for the database provider and deployment policy. Do not run it on an empty database.
 
 ## Troubleshooting
 
-### "No migrations found to squash"
-- Ensure your Migrations folder contains at least one migration
-- Check that migration files follow the standard EF Core naming pattern
+### No migrations found to squash
 
-### "Down method is empty"
-- The tool automatically generates inverse operations from Up methods
-- Review the generated Down method to ensure it's correct
+Confirm that the project has a `Migrations` directory and standard migration filenames beginning with a 14-digit timestamp.
 
-### Build fails after consolidation
-- Check that the ModelSnapshot.cs file is valid
-- Ensure all entity configurations are correct
-- Review the Designer.cs file for issues
+### Generated code does not compile
+
+Confirm the `--context` value, inspect the preserved model snapshot, and restore the automatically created `.cs.bak` files if needed. Provider-specific migration code may require provider namespaces already present in the snapshot.
+
+### Existing database still reports pending migrations
+
+Verify that the migration ID in `UpdateExistingDatabases.sql` exactly matches the generated migration filename, back up the database, then update `__EFMigrationsHistory` according to the reviewed script.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Issues and pull requests are welcome.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Author
-
-Created by **AmirTahan80**
-
-## Support
-
-If you encounter issues or have suggestions, please open an issue on GitHub.
-
----
-
-**Made with ❤️ for the .NET community**
+Licensed under the [MIT License](LICENSE).
