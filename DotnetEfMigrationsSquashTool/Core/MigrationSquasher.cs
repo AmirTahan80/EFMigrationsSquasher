@@ -14,12 +14,12 @@ public class MigrationSquasher
     private readonly string _migrationsFolder;
     private readonly string _projectDirectory;
 
-    public MigrationSquasher(string projectPath, string contextName)
+    public MigrationSquasher(string projectPath, string contextName, string migration)
     {
         _projectPath = projectPath;
         _contextName = contextName;
         _projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
-        _migrationsFolder = Path.Combine(_projectDirectory, "Migrations");
+        _migrationsFolder = Path.Combine(migration, "Migrations");
     }
 
     public async Task PreviewSquashAsync(string newMigrationName)

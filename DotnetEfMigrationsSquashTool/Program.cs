@@ -17,6 +17,7 @@ namespace EfMigrationSquasher
             // Simpler option definitions
             var projectOption = new Option<string>("--project") { Required = true };
             var contextOption = new Option<string>("--context") { Required = true };
+            var migrationOption = new Option<string>("--migration-root") { Required = true };
             var nameOption = new Option<string>("--name")
             {
                 DefaultValueFactory = (s) => "ConsolidatedMigration"
@@ -31,11 +32,13 @@ namespace EfMigrationSquasher
             contextOption.Description = "DbContext class name";
             nameOption.Description = "Name for the new consolidated migration";
             dryRunOption.Description = "Show what would be done without making changes";
+            migrationOption.Description = "Path to migration files";
 
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(contextOption);
             rootCommand.Options.Add(nameOption);
             rootCommand.Options.Add(dryRunOption);
+            rootCommand.option.Add(migrationOption)
 
             rootCommand.SetAction(async (parseResult) =>
             {
@@ -43,67 +46,13 @@ namespace EfMigrationSquasher
                 var context = parseResult.GetValue(contextOption);
                 var name = parseResult.GetValue(nameOption);
                 var dryRun = parseResult.GetValue(dryRunOption);
+                var migration = parseResult.GetValue(migrationOption)
 
-                return await SquashMigrationsAsync(project!, context!, name!, dryRun);
+                return await SquashHelper.SquashMigrationsAsync(project!, context!, migration!, name!, dryRun);
             });
 
             ParseResult parseResult = rootCommand.Parse(args);
             return await parseResult.InvokeAsync();
-        }
-
-        static async Task<int> SquashMigrationsAsync(string projectPath, string contextName, string migrationName, bool dryRun)
-        {
-            try
-            {
-                Console.WriteLine("🚀 EF Core Migration Squasher");
-                Console.WriteLine("============================");
-                Console.WriteLine($"🔍 Analyzing project: {projectPath}");
-                Console.WriteLine($"📊 DbContext: {contextName}");
-                Console.WriteLine();
-
-                // Validate project file exists AND is a .csproj file
-                if (!File.Exists(projectPath))
-                {
-                    Console.WriteLine($"❌ Project file not found: {projectPath}");
-                    return 1;
-                }
-
-                if (!projectPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-                {
-                    Console.WriteLine($"❌ Invalid project file. Must be a .csproj file: {projectPath}");
-                    Console.WriteLine($"   You provided: {projectPath}");
-                    Console.WriteLine($"   Example: --project \"./MyApp/MyApp.csproj\"");
-                    return 1;
-                }
-
-                if (!Regex.IsMatch(migrationName, @"^[_\p{L}][\p{L}\p{Nd}_]*$"))
-                {
-                    Console.WriteLine($"❌ Invalid migration name: {migrationName}");
-                    Console.WriteLine("   Use a valid C# identifier, for example: ConsolidatedMigration");
-                    return 1;
-                }
-
-                Console.WriteLine("✅ Project file found!");
-
-                var migrationSquasher = new MigrationSquasher(projectPath, contextName);
-
-                if (dryRun)
-                {
-                    await migrationSquasher.PreviewSquashAsync(migrationName);
-                }
-                else
-                {
-                    await migrationSquasher.SquashMigrationsAsync(migrationName);
-                }
-
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error: {ex.Message}");
-                Console.WriteLine($"🔍 Stack trace: {ex.StackTrace}");
-                return 1;
-            }
         }
     }
 }
