@@ -36,19 +36,20 @@ dotnet tool install --global --add-source DotnetEfMigrationsSquashTool/bin/Relea
 Preview the operation first:
 
 ```bash
-ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbContext" --dry-run
+ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbContext" --migration-root "./MyApp" --dry-run
 ```
 
 Create the consolidated migration:
 
 ```bash
-ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbContext" --name "InitialSchema"
+ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbContext" --migration-root "./MyApp" --name "InitialSchema"
 ```
 
 Options:
 
 - `--project` (required): path to the project containing the migrations
 - `--context` (required): `DbContext` class name used in the generated designer
+- `--migration-root` (required): directory containing the `Migrations` folder
 - `--name`: consolidated migration class name; defaults to `ConsolidatedMigration`
 - `--dry-run`: lists affected files without changing them
 

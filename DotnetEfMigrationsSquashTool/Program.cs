@@ -1,10 +1,4 @@
-﻿using System;
-using System.CommandLine;
-using System.IO;
-using System.Linq;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
-using System.Text.RegularExpressions;
+﻿using System.CommandLine;
 
 namespace EfMigrationSquasher
 {
@@ -32,13 +26,13 @@ namespace EfMigrationSquasher
             contextOption.Description = "DbContext class name";
             nameOption.Description = "Name for the new consolidated migration";
             dryRunOption.Description = "Show what would be done without making changes";
-            migrationOption.Description = "Path to migration files";
+            migrationOption.Description = "Directory containing the Migrations folder";
 
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(contextOption);
             rootCommand.Options.Add(nameOption);
             rootCommand.Options.Add(dryRunOption);
-            rootCommand.option.Add(migrationOption)
+            rootCommand.Options.Add(migrationOption);
 
             rootCommand.SetAction(async (parseResult) =>
             {
@@ -46,7 +40,7 @@ namespace EfMigrationSquasher
                 var context = parseResult.GetValue(contextOption);
                 var name = parseResult.GetValue(nameOption);
                 var dryRun = parseResult.GetValue(dryRunOption);
-                var migration = parseResult.GetValue(migrationOption)
+                var migration = parseResult.GetValue(migrationOption);
 
                 return await SquashHelper.SquashMigrationsAsync(project!, context!, migration!, name!, dryRun);
             });

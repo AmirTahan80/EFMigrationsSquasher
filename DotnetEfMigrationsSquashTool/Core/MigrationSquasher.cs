@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 public class MigrationSquasher
 {
-    private const string EfCoreVersion = "10.0.3";
+    private const string DefaultEfCoreVersion = "10.0.3";
     private readonly string _projectPath;
     private readonly string _contextName;
     private readonly string _migrationsFolder;
@@ -68,6 +68,11 @@ public class MigrationSquasher
 
             // Step 3: Get current model snapshot
             var modelSnapshot = GetModelSnapshot();
+            var efCoreVersion = GetEfCoreVersion(modelSnapshot);
+            var migrationNamespace = GetMigrationNamespace(modelSnapshot);
+            var migrationUsingDirectives = GetMigrationUsingDirectives();
+
+            Console.WriteLine($"📦 EF Core product version: {efCoreVersion}");
 
             // Step 4: Extract schema BEFORE removing files
             var extractedSchema = await ExtractSchemaFromExistingMigrationsAsync();
@@ -80,10 +85,17 @@ public class MigrationSquasher
             RemoveOldMigrations();
 
             // Step 7: Create new consolidated migration with both Up and Down
-            var migrationId = await CreateConsolidatedMigrationAsync(migrationName, extractedSchema, extractedDown);
+            var migrationId = await CreateConsolidatedMigrationAsync(
+                migrationName,
+                extractedSchema,
+                extractedDown,
+                modelSnapshot,
+                efCoreVersion,
+                migrationNamespace,
+                migrationUsingDirectives);
 
             // Step 8: Generate database update script
-            GenerateDatabaseUpdateScript(migrationName, migrationId);
+            GenerateDatabaseUpdateScript(migrationName, migrationId, efCoreVersion);
 
             Console.WriteLine();
             Console.WriteLine("✅ Migration squash completed successfully!");
@@ -160,6 +172,51 @@ public class MigrationSquasher
         return string.Empty;
     }
 
+    private static string GetEfCoreVersion(string modelSnapshot)
+    {
+        var match = Regex.Match(
+            modelSnapshot,
+            @"\.HasAnnotation\(""ProductVersion"",\s*""([^""]+)""\)");
+
+        return match.Success ? match.Groups[1].Value : DefaultEfCoreVersion;
+    }
+
+    private string GetMigrationNamespace(string modelSnapshot)
+    {
+        var match = Regex.Match(modelSnapshot, @"\bnamespace\s+([^\s{;]+)");
+        return match.Success
+            ? match.Groups[1].Value
+            : $"{Path.GetFileNameWithoutExtension(_projectPath)}.Migrations";
+    }
+
+    private IReadOnlyList<string> GetMigrationUsingDirectives()
+    {
+        var usingDirectives = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var file in GetMigrationFiles()
+                     .Where(f => !f.EndsWith(".Designer.cs"))
+                     .OrderBy(f => f))
+        {
+            var content = File.ReadAllText(file);
+            var namespaceMatch = Regex.Match(content, @"\bnamespace\b");
+            var header = namespaceMatch.Success ? content[..namespaceMatch.Index] : content;
+
+            foreach (var line in header.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                var directive = line.Trim();
+                if (directive.StartsWith("using ", StringComparison.Ordinal)
+                    && directive.EndsWith(';')
+                    && seen.Add(directive))
+                {
+                    usingDirectives.Add(directive);
+                }
+            }
+        }
+
+        return usingDirectives;
+    }
+
     private async Task<string> ExtractSchemaFromExistingMigrationsAsync()
     {
         Console.WriteLine("🔍 Extracting schema from existing migrations...");
@@ -184,7 +241,9 @@ public class MigrationSquasher
                     Console.WriteLine($"  📄 Processing: {fileName}");
 
                     consolidatedUp.AppendLine($"            // From {fileName}");
+                    consolidatedUp.AppendLine("            {");
                     consolidatedUp.AppendLine(upMethodContent);
+                    consolidatedUp.AppendLine("            }");
                     consolidatedUp.AppendLine();
                 }
             }
@@ -255,36 +314,61 @@ public class MigrationSquasher
         Console.WriteLine($"✅ Removed {filesToRemove.Count} migration files");
     }
 
-    private async Task<string> CreateConsolidatedMigrationAsync(string migrationName, string extractedSchema, string extractedDown)
+    private async Task<string> CreateConsolidatedMigrationAsync(
+        string migrationName,
+        string extractedSchema,
+        string extractedDown,
+        string modelSnapshot,
+        string efCoreVersion,
+        string migrationNamespace,
+        IReadOnlyList<string> migrationUsingDirectives)
     {
         Console.WriteLine($"📝 Creating consolidated migration: {migrationName}");
 
         var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
         var className = $"{timestamp}_{migrationName}";
 
-        var migrationContent = GenerateConsolidatedMigrationContent(className, migrationName, extractedSchema, extractedDown);
+        var migrationContent = GenerateConsolidatedMigrationContent(
+            migrationName,
+            extractedSchema,
+            extractedDown,
+            migrationNamespace,
+            migrationUsingDirectives);
         var migrationFile = Path.Combine(_migrationsFolder, $"{className}.cs");
 
         await File.WriteAllTextAsync(migrationFile, migrationContent);
         Console.WriteLine($"✅ Created: {Path.GetFileName(migrationFile)}");
 
         // Create designer file
-        var designerContent = GenerateDesignerContent(className, migrationName);
+        var designerContent = GenerateDesignerContent(
+            className,
+            migrationName,
+            modelSnapshot,
+            efCoreVersion,
+            migrationNamespace);
         var designerFile = Path.Combine(_migrationsFolder, $"{className}.Designer.cs");
         await File.WriteAllTextAsync(designerFile, designerContent);
         Console.WriteLine($"✅ Created: {Path.GetFileName(designerFile)}");
         return className;
     }
 
-    private string GenerateConsolidatedMigrationContent(string className, string migrationName, string extractedSchema, string extractedDown)
+    private static string GenerateConsolidatedMigrationContent(
+        string migrationName,
+        string extractedSchema,
+        string extractedDown,
+        string migrationNamespace,
+        IReadOnlyList<string> migrationUsingDirectives)
     {
-        var projectName = Path.GetFileNameWithoutExtension(_projectPath);
+        var usingDirectives = new[] { "using Microsoft.EntityFrameworkCore.Migrations;" }
+            .Concat(migrationUsingDirectives)
+            .Distinct(StringComparer.Ordinal);
+        var usingBlock = string.Join(Environment.NewLine, usingDirectives);
 
-        return $@"using Microsoft.EntityFrameworkCore.Migrations;
+        return $@"{usingBlock}
 
 #nullable disable
 
-namespace {projectName}.Migrations
+namespace {migrationNamespace}
 {{
     /// <inheritdoc />
     public partial class {migrationName} : Migration
@@ -326,7 +410,9 @@ namespace {projectName}.Migrations
                 {
                     var fileName = Path.GetFileNameWithoutExtension(file);
                     consolidatedDown.AppendLine($"            // From {fileName}");
+                    consolidatedDown.AppendLine("            {");
                     consolidatedDown.AppendLine(downMethodContent);
+                    consolidatedDown.AppendLine("            }");
                     consolidatedDown.AppendLine();
                     hasExtractedDowns = true;
                 }
@@ -498,11 +584,13 @@ namespace {projectName}.Migrations
             throw new NotImplementedException(""Please add your table creation commands to this migration."");";
     }
 
-    private string GenerateDesignerContent(string className, string migrationName)
+    private string GenerateDesignerContent(
+        string className,
+        string migrationName,
+        string modelSnapshot,
+        string efCoreVersion,
+        string migrationNamespace)
     {
-        var projectName = Path.GetFileNameWithoutExtension(_projectPath);
-        var modelSnapshot = GetModelSnapshot();
-
         // If we have a model snapshot, extract the BuildModel method content
         if (!string.IsNullOrWhiteSpace(modelSnapshot))
         {
@@ -515,7 +603,7 @@ namespace {projectName}.Migrations
                     buildModelContent = Regex.Replace(
                         buildModelContent,
                         @"\.HasAnnotation\(""ProductVersion"",\s*""[^""]+""\)",
-                        $@".HasAnnotation(""ProductVersion"", ""{EfCoreVersion}"")");
+                        $@".HasAnnotation(""ProductVersion"", ""{efCoreVersion}"")");
                     var snapshotHeader = modelSnapshot[..buildModelMatch.Index];
                     var generatedUsings = new HashSet<string>(StringComparer.Ordinal)
                     {
@@ -531,11 +619,6 @@ namespace {projectName}.Migrations
                             .Where(line => line.TrimStart().StartsWith("using ", StringComparison.Ordinal))
                             .Where(line => !generatedUsings.Contains(line.Trim()))
                             .Distinct());
-                    var namespaceMatch = Regex.Match(snapshotHeader, @"\bnamespace\s+([^\s{;]+)");
-                    var migrationNamespace = namespaceMatch.Success
-                        ? namespaceMatch.Groups[1].Value
-                        : $"{projectName}.Migrations";
-
                     return $@"// <auto-generated />
 using System;
 using Microsoft.EntityFrameworkCore;
@@ -577,7 +660,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
 
-namespace {projectName}.Migrations
+namespace {migrationNamespace}
 {{
     [DbContext(typeof({_contextName}))]
     [Migration(""{className}"")]
@@ -590,7 +673,7 @@ namespace {projectName}.Migrations
             // You can copy this from your model snapshot or latest migration's Designer file
             
             modelBuilder
-                .HasAnnotation(""ProductVersion"", ""{EfCoreVersion}"")
+                .HasAnnotation(""ProductVersion"", ""{efCoreVersion}"")
                 .HasAnnotation(""Relational:MaxIdentifierLength"", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
@@ -618,7 +701,7 @@ namespace {projectName}.Migrations
         throw new InvalidDataException("The model snapshot contains an incomplete BuildModel method.");
     }
 
-    private void GenerateDatabaseUpdateScript(string migrationName, string migrationId)
+    private void GenerateDatabaseUpdateScript(string migrationName, string migrationId, string efCoreVersion)
     {
         var scriptContent = $@"-- ===============================================
 -- EF Core Migration Squash - Database Update Script
@@ -663,7 +746,7 @@ PRINT '=== Updating Migration History ===';
 -- Step 3: Add the new consolidated migration as 'applied'
 -- This tells EF Core that this migration has already been applied to this database
 INSERT INTO __EFMigrationsHistory (MigrationId, ProductVersion) 
-VALUES ('{migrationId}', '{EfCoreVersion}');
+VALUES ('{migrationId}', '{efCoreVersion}');
 
 -- Step 4: Verify the update
 PRINT '';

@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 public static class SquashHelper
 {
     public static async Task<int> SquashMigrationsAsync(string projectPath, string contextName, string migration, string migrationName, bool dryRun)
@@ -17,9 +19,16 @@ public static class SquashHelper
                 return 1;
             }
 
-            if(!File.Exists(migration)))
+            if (!Directory.Exists(migration))
             {
-                Console.WriteLine($"❌ Migration files not found: {migration}");
+                Console.WriteLine($"❌ Migration root directory not found: {migration}");
+                return 1;
+            }
+
+            var migrationsFolder = Path.Combine(migration, "Migrations");
+            if (!Directory.Exists(migrationsFolder))
+            {
+                Console.WriteLine($"❌ Migrations directory not found: {migrationsFolder}");
                 return 1;
             }
 
