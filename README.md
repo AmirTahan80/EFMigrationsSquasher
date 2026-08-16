@@ -1,11 +1,13 @@
 # EF Core Migrations Squasher
 
-EF Core Migrations Squasher is a .NET 10 command-line tool that replaces a project's timestamped Entity Framework Core migrations with one consolidated migration.
+EF Core Migrations Squasher is a .NET 10 command-line tool that **merges** a project's timestamped Entity Framework Core migrations into its **last existing migration**.
 
-It preserves the existing `Up` operations in chronological order, preserves `Down` operations in reverse order, keeps the current model snapshot, and creates a backup before changing any migration files.
+Unlike a naive "consolidate into a new migration" approach, this tool keeps the id of the last migration. Because deployed databases already have that id recorded in `__EFMigrationsHistory`, **the database is never affected** by the merge — there is no pending migration for EF to try to re-apply.
+
+It merges `Up` operations in chronological order, merges `Down` operations in reverse order, removes exact-duplicate operations, cancels create/drop pairs that net to nothing, keeps the current model snapshot, marks each block with the source migration, and creates a backup before changing any migration files.
 
 > [!WARNING]
-> Squashing rewrites migration history. Use source control, run `--dry-run` first, and test the result against disposable databases before using it in production.
+> Merging rewrites migration history. Use source control, run `--dry-run` first, and test the result against disposable databases before using it in production.
 
 ## Requirements
 
@@ -70,7 +72,8 @@ ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbCo
 | `--project` | Yes | Path to the target `.csproj` file. |
 | `--context` | Yes | `DbContext` class name used by the generated designer. |
 | `--migration-root` | Yes | Directory that directly contains the `Migrations` folder. |
-| `--name` | No | New migration class name. Defaults to `ConsolidatedMigration`. |
+| `--name` | No | Ignored for the migration id (the last existing id is always kept). Used only as a label. |
+| `--update-database` | No | Update the database (`dotnet ef database update`) *before* merging. Without this flag, the tool asks interactively. |
 | `--dry-run` | No | Shows what would change without writing or deleting files. |
 | `--help` | No | Displays CLI help. |
 
@@ -95,31 +98,38 @@ use:
 
 ## What the tool changes
 
-When the squash runs, the tool:
+When the merge runs, the tool:
 
-1. Finds conventional timestamp-prefixed migration files.
-2. Copies all migration C# files and the snapshot into `MigrationsBackup_<timestamp>` using the `.cs.bak` extension.
-3. Combines non-empty `Up` bodies in chronological order.
-4. Combines non-empty `Down` bodies in reverse chronological order.
-5. Preserves required `using` directives and isolates each original migration body in its own scope.
-6. Removes the old migration and designer files while retaining the model snapshot.
-7. Creates one consolidated migration and matching designer.
-8. Creates `Migrations/UpdateExistingDatabases.sql` for reviewing SQL Server migration-history changes.
+1. Finds conventional timestamp-prefixed migration files, ordered chronologically.
+2. (Optional) If you choose to update the database, runs `dotnet ef database update` first so the database is fully up to date **before** any files change.
+3. Copies all migration C# files and the snapshot into `MigrationsBackup_<timestamp>` using the `.cs.bak` extension.
+4. Combines every migration's non-empty `Up` bodies in chronological order.
+5. Combines every migration's non-empty `Down` bodies in reverse chronological order.
+6. Removes exact-duplicate operations and cancels create/drop pairs that net to nothing (e.g. `CreateTable(X)` then `DropTable(X)` leaves `X` absent, so both are dropped).
+7. Writes a `/* These operations come from <migrationId> */` marker before each source's block.
+8. Rewrites the **last** migration (and its designer) in place, keeping its original id/timestamp.
+9. Removes the earlier migration and designer files while retaining the model snapshot.
+10. Creates `Migrations/UpdateExistingDatabases.sql` that only removes the folded-away ids from `__EFMigrationsHistory` (the kept id stays, so the schema is untouched).
 
 The resulting directory resembles:
 
 ```text
 MyApp/
 ├── Migrations/
-│   ├── 20260120104500_InitialSchema.cs
-│   ├── 20260120104500_InitialSchema.Designer.cs
+│   ├── 20260301000003_InitialSchema.cs        ← rewritten, keeps its id
+│   ├── 20260301000003_InitialSchema.Designer.cs
 │   ├── ApplicationDbContextModelSnapshot.cs
 │   └── UpdateExistingDatabases.sql
-└── MigrationsBackup_20260120_134500/
+└── MigrationsBackup_20260301_134500/
     ├── 20260115123000_InitialCreate.cs.bak
     ├── 20260115123000_InitialCreate.Designer.cs.bak
+    ├── 20260201000002_AddFoo.cs.bak
     └── ApplicationDbContextModelSnapshot.cs.bak
 ```
+
+Because the kept migration id already exists in deployment databases' `__EFMigrationsHistory`,
+running the application or `dotnet ef database update` afterward reports **no pending migrations**
+and the schema is left exactly as it was.
 
 ## Validate the result
 
@@ -163,7 +173,7 @@ The squasher preserves that C# code and its imports, but you must review it care
 
 The backup directory contains the original files with a `.bak` suffix. To restore manually:
 
-1. Remove the generated consolidated migration, designer, and SQL helper script.
+1. Remove the generated merged migration, designer, and SQL helper script.
 2. Copy the backup files into the original `Migrations` directory.
 3. Remove only the final `.bak` suffix from each restored filename.
 4. Build the project and verify the restored migration list.

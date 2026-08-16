@@ -1,625 +1,573 @@
 ﻿using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
-public class MigrationSquasher
+namespace EfMigrationSquasher
 {
-    private const string DefaultEfCoreVersion = "10.0.3";
-    private readonly string _projectPath;
-    private readonly string _contextName;
-    private readonly string _migrationsFolder;
-    private readonly string _projectDirectory;
-
-    public MigrationSquasher(string projectPath, string contextName, string migration)
+    /// <summary>
+    /// Merges an EF Core project's timestamped migrations into its LAST existing migration.
+    /// The last migration keeps its original id/timestamp, so databases that already have that
+    /// id recorded in __EFMigrationsHistory are never affected. All earlier migrations are folded
+    /// into it and then removed.
+    /// </summary>
+    public class MigrationSquasher
     {
-        _projectPath = projectPath;
-        _contextName = contextName;
-        _projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
-        _migrationsFolder = Path.Combine(migration, "Migrations");
-    }
+        private const string DefaultEfCoreVersion = "10.0.3";
+        private readonly string _projectPath;
+        private readonly string _contextName;
+        private readonly string _migrationsFolder;
+        private readonly string _projectDirectory;
 
-    public async Task PreviewSquashAsync(string newMigrationName)
-    {
-        var migrations = GetExistingMigrations();
-
-        Console.WriteLine($"📋 Found {migrations.Count} existing migrations:");
-        foreach (var migration in migrations)
+        public MigrationSquasher(string projectPath, string contextName, string migration)
         {
-            Console.WriteLine($"  • {migration}");
+            _projectPath = projectPath;
+            _contextName = contextName;
+            _projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
+            _migrationsFolder = Path.Combine(migration, "Migrations");
         }
 
-        Console.WriteLine($"\n🎯 Would create new migration: {newMigrationName}");
-        Console.WriteLine($"📁 Migrations folder: {_migrationsFolder}");
+        // ---- Migration discovery -------------------------------------------------
 
-        var migrationFiles = GetMigrationFiles();
-        Console.WriteLine($"\n📄 Files that would be removed ({migrationFiles.Count}):");
-        foreach (var file in migrationFiles)
+        private record MigrationInfo(string Id, string Name, string FilePath, string? DesignerPath)
         {
-            Console.WriteLine($"  • {Path.GetFileName(file)}");
+            // Id looks like "20251130215721_initialSchema" (timestamp + name, also the class name).
+            public string Timestamp => Id.Length >= 14 ? Id.Substring(0, 14) : Id;
+            public string ClassName => Id;
         }
 
-        Console.WriteLine("\n💡 To actually perform the squash, run without --dry-run");
-        Console.WriteLine("⚠️  Make sure to backup your project first!");
-    }
-
-    public async Task SquashMigrationsAsync(string migrationName)
-    {
-        try
+        private List<MigrationInfo> GetExistingMigrations()
         {
-            Console.WriteLine("🚀 Starting migration squash process...");
-            Console.WriteLine();
+            if (!Directory.Exists(_migrationsFolder))
+                return new List<MigrationInfo>();
 
-            // Step 1: Validate migrations exist
-            var existingMigrations = GetExistingMigrations();
-            if (existingMigrations.Count == 0)
+            return Directory.GetFiles(_migrationsFolder, "*.cs")
+                .Where(f => !f.EndsWith("ModelSnapshot.cs", StringComparison.Ordinal))
+                .Where(f => !f.EndsWith(".Designer.cs", StringComparison.Ordinal))
+                .Select(Path.GetFileNameWithoutExtension)
+                .Where(name => name != null && name.Length > 14 && name.Substring(0, 14).All(char.IsDigit))
+                .OrderBy(x => x, StringComparer.Ordinal) // chronological
+                .Select(id =>
+                {
+                    var file = Directory.GetFiles(_migrationsFolder, id + ".cs").First();
+                    var designer = Directory.GetFiles(_migrationsFolder, id + ".Designer.cs").FirstOrDefault();
+                    var name = id.Length > 15 ? id.Substring(15) : id;
+                    return new MigrationInfo(id!, name, file, designer);
+                })
+                .ToList();
+        }
+
+        private List<string> GetAllMigrationFiles() =>
+            Directory.Exists(_migrationsFolder)
+                ? Directory.GetFiles(_migrationsFolder, "*.cs")
+                    .Where(f => !f.EndsWith("ModelSnapshot.cs", StringComparison.Ordinal))
+                    .ToList()
+                : new List<string>();
+
+        // ---- Preview -------------------------------------------------------------
+
+        public async Task PreviewSquashAsync(bool updateDatabase)
+        {
+            var migrations = GetExistingMigrations();
+            if (migrations.Count == 0)
             {
                 Console.WriteLine("❌ No migrations found to squash!");
                 return;
             }
 
-            Console.WriteLine($"📋 Found {existingMigrations.Count} migrations to squash");
+            Console.WriteLine($"📋 Found {migrations.Count} existing migrations:");
+            foreach (var m in migrations)
+                Console.WriteLine($"  • {m.Id}");
 
-            // Step 2: Create backup
-            await CreateBackupAsync();
-
-            // Step 3: Get current model snapshot
-            var modelSnapshot = GetModelSnapshot();
-            var efCoreVersion = GetEfCoreVersion(modelSnapshot);
-            var migrationNamespace = GetMigrationNamespace(modelSnapshot);
-            var migrationUsingDirectives = GetMigrationUsingDirectives();
-
-            Console.WriteLine($"📦 EF Core product version: {efCoreVersion}");
-
-            // Step 4: Extract schema BEFORE removing files
-            var extractedSchema = await ExtractSchemaFromExistingMigrationsAsync();
-
-            // Step 5: Extract down methods BEFORE removing files
-            Console.WriteLine("🔍 Extracting Down methods from existing migrations...");
-            var extractedDown = ExtractDownMethodsAsync();
-
-            // Step 6: Remove old migration files
-            RemoveOldMigrations();
-
-            // Step 7: Create new consolidated migration with both Up and Down
-            var migrationId = await CreateConsolidatedMigrationAsync(
-                migrationName,
-                extractedSchema,
-                extractedDown,
-                modelSnapshot,
-                efCoreVersion,
-                migrationNamespace,
-                migrationUsingDirectives);
-
-            // Step 8: Generate database update script
-            GenerateDatabaseUpdateScript(migrationName, migrationId, efCoreVersion);
+            var last = migrations[^1];
+            var merged = migrations.Take(migrations.Count - 1).ToList();
 
             Console.WriteLine();
-            Console.WriteLine("✅ Migration squash completed successfully!");
-            Console.WriteLine();
-            Console.WriteLine("📋 Next steps:");
-            Console.WriteLine("1. Review the generated consolidated migration");
-            Console.WriteLine("2. Update existing databases using the generated SQL script");
-            Console.WriteLine("3. Test thoroughly before deploying to production");
-            Console.WriteLine();
-            Console.WriteLine($"📄 SQL script generated: {Path.Combine(_migrationsFolder, "UpdateExistingDatabases.sql")}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"❌ Error during migration squash: {ex.Message}");
-            Console.WriteLine("🔄 Restore from backup if needed");
-            throw;
-        }
-    }
-
-    private List<string> GetExistingMigrations()
-    {
-        if (!Directory.Exists(_migrationsFolder))
-            return new List<string>();
-
-        return Directory.GetFiles(_migrationsFolder, "*.cs")
-            .Where(f => !f.EndsWith("ModelSnapshot.cs"))
-            .Where(f => !f.EndsWith(".Designer.cs"))
-            .Select(Path.GetFileNameWithoutExtension)
-            .Where(name => name != null && name.Length > 15 && name.Substring(0, 14).All(char.IsDigit))
-            .OrderBy(x => x)
-            .ToList()!;
-    }
-
-    private List<string> GetMigrationFiles()
-    {
-        if (!Directory.Exists(_migrationsFolder))
-            return new List<string>();
-
-        return Directory.GetFiles(_migrationsFolder, "*.cs")
-            .Where(f => !f.EndsWith("ModelSnapshot.cs"))
-            .ToList();
-    }
-
-    private async Task CreateBackupAsync()
-    {
-        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        var backupFolder = Path.Combine(_projectDirectory, $"MigrationsBackup_{timestamp}");
-
-        Console.WriteLine($"💾 Creating backup in: {backupFolder}");
-        Directory.CreateDirectory(backupFolder);
-
-        foreach (var file in Directory.GetFiles(_migrationsFolder, "*.cs"))
-        {
-            var fileName = Path.GetFileName(file);
-            // Keep backups inside the project but outside the SDK's default **/*.cs compile glob.
-            var backupPath = Path.Combine(backupFolder, $"{fileName}.bak");
-            File.Copy(file, backupPath);
-        }
-
-        Console.WriteLine($"✅ Backup created with {Directory.GetFiles(backupFolder).Length} files");
-        await Task.CompletedTask;
-    }
-
-    private string GetModelSnapshot()
-    {
-        var snapshotFile = Directory.GetFiles(_migrationsFolder, "*ModelSnapshot.cs").FirstOrDefault();
-        if (snapshotFile != null && File.Exists(snapshotFile))
-        {
-            Console.WriteLine("📸 Found model snapshot");
-            return File.ReadAllText(snapshotFile);
-        }
-
-        Console.WriteLine("⚠️  No model snapshot found");
-        return string.Empty;
-    }
-
-    private static string GetEfCoreVersion(string modelSnapshot)
-    {
-        var match = Regex.Match(
-            modelSnapshot,
-            @"\.HasAnnotation\(""ProductVersion"",\s*""([^""]+)""\)");
-
-        return match.Success ? match.Groups[1].Value : DefaultEfCoreVersion;
-    }
-
-    private string GetMigrationNamespace(string modelSnapshot)
-    {
-        var match = Regex.Match(modelSnapshot, @"\bnamespace\s+([^\s{;]+)");
-        return match.Success
-            ? match.Groups[1].Value
-            : $"{Path.GetFileNameWithoutExtension(_projectPath)}.Migrations";
-    }
-
-    private IReadOnlyList<string> GetMigrationUsingDirectives()
-    {
-        var usingDirectives = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-
-        foreach (var file in GetMigrationFiles()
-                     .Where(f => !f.EndsWith(".Designer.cs"))
-                     .OrderBy(f => f))
-        {
-            var content = File.ReadAllText(file);
-            var namespaceMatch = Regex.Match(content, @"\bnamespace\b");
-            var header = namespaceMatch.Success ? content[..namespaceMatch.Index] : content;
-
-            foreach (var line in header.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            Console.WriteLine($"🎯 Will MERGE all migrations into the LAST one: {last.Id}");
+            Console.WriteLine("   (its id is preserved so existing databases are not affected)");
+            if (merged.Count > 0)
             {
-                var directive = line.Trim();
-                if (directive.StartsWith("using ", StringComparison.Ordinal)
-                    && directive.EndsWith(';')
-                    && seen.Add(directive))
-                {
-                    usingDirectives.Add(directive);
-                }
+                Console.WriteLine($"🗑️  Will REMOVE {merged.Count} earlier migration(s):");
+                foreach (var m in merged)
+                    Console.WriteLine($"  • {m.Id}");
             }
+            else
+            {
+                Console.WriteLine("   (only one migration exists — nothing to merge)");
+            }
+
+            if (updateDatabase)
+                Console.WriteLine("\n💾 Database will be updated (dotnet ef database update) BEFORE squashing.");
+
+            Console.WriteLine("\n💡 To actually perform the squash, run without --dry-run");
+            Console.WriteLine("⚠️  Make sure to back up your project / database first!");
+            await Task.CompletedTask;
         }
 
-        return usingDirectives;
-    }
+        // ---- Main squash ---------------------------------------------------------
 
-    private async Task<string> ExtractSchemaFromExistingMigrationsAsync()
-    {
-        Console.WriteLine("🔍 Extracting schema from existing migrations...");
-
-        var migrationFiles = GetMigrationFiles()
-            .Where(f => !f.EndsWith(".Designer.cs"))
-            .OrderBy(f => f)
-            .ToList();
-
-        var consolidatedUp = new StringBuilder();
-
-        foreach (var file in migrationFiles)
+        public async Task<int> SquashMigrationsAsync(string _unusedName, bool updateDatabase)
         {
             try
             {
-                var content = await File.ReadAllTextAsync(file);
-                var upMethodContent = ExtractUpMethodContent(content);
+                Console.WriteLine("🚀 Starting migration merge (into last existing migration)...");
+                Console.WriteLine();
 
-                if (!string.IsNullOrWhiteSpace(upMethodContent))
+                var migrations = GetExistingMigrations();
+                if (migrations.Count == 0)
                 {
-                    var fileName = Path.GetFileNameWithoutExtension(file);
-                    Console.WriteLine($"  📄 Processing: {fileName}");
-
-                    consolidatedUp.AppendLine($"            // From {fileName}");
-                    consolidatedUp.AppendLine("            {");
-                    consolidatedUp.AppendLine(upMethodContent);
-                    consolidatedUp.AppendLine("            }");
-                    consolidatedUp.AppendLine();
+                    Console.WriteLine("❌ No migrations found to squash!");
+                    return 1;
                 }
+
+                Console.WriteLine($"📋 Found {migrations.Count} migrations");
+
+                // Step 1 (optional): bring the database fully up to date BEFORE we touch files.
+                if (updateDatabase)
+                {
+                    var ok = await UpdateDatabaseAsync();
+                    if (!ok) return 1;
+                }
+
+                // Step 2: backup
+                await CreateBackupAsync();
+
+                // Step 3: metadata from the model snapshot
+                var modelSnapshot = GetModelSnapshot();
+                var efCoreVersion = GetEfCoreVersion(modelSnapshot);
+                var migrationNamespace = GetMigrationNamespace(modelSnapshot);
+                var migrationUsingDirectives = GetMigrationUsingDirectives();
+
+                Console.WriteLine($"📦 EF Core product version: {efCoreVersion}");
+
+                var last = migrations[^1];
+                var earlier = migrations.Take(migrations.Count - 1).ToList();
+
+                // Step 4: merge Up (chronological) and Down (reverse) with dedup/cancel.
+                var (upBody, downBody, mergedCount, deduped, cancelled) =
+                    MergeOperations(migrations);
+
+                Console.WriteLine($"🔀 Merged {mergedCount} migration(s) into '{last.Id}'");
+                if (deduped > 0) Console.WriteLine($"   removed {deduped} exact-duplicate operation(s)");
+                if (cancelled > 0) Console.WriteLine($"   cancelled {cancelled} create/drop pair(s) that net to nothing");
+
+                // Step 5: rewrite the LAST migration file in place (keep its id/name).
+                await WriteMergedMigrationAsync(last, upBody, downBody, migrationNamespace, migrationUsingDirectives);
+
+                // Step 6: regenerate the last migration's designer from the snapshot (keeps its id).
+                await WriteDesignerAsync(last, modelSnapshot, efCoreVersion, migrationNamespace);
+
+                // Step 7: delete the earlier migration files + their designers.
+                foreach (var m in earlier)
+                {
+                    Console.WriteLine($"🗑️  Removing: {Path.GetFileName(m.FilePath)}");
+                    File.Delete(m.FilePath);
+                    if (m.DesignerPath != null)
+                    {
+                        Console.WriteLine($"🗑️  Removing: {Path.GetFileName(m.DesignerPath)}");
+                        File.Delete(m.DesignerPath);
+                    }
+                }
+
+                // Step 8: history cleanup script (delete only the folded-away ids).
+                GenerateHistoryCleanupScript(last, earlier, efCoreVersion);
+
+                Console.WriteLine();
+                Console.WriteLine("✅ Migration merge completed successfully!");
+                Console.WriteLine();
+                Console.WriteLine("📋 Next steps:");
+                Console.WriteLine("1. Build the project and review the merged migration.");
+                Console.WriteLine("2. If you updated the database first, run the generated SQL to drop the");
+                Console.WriteLine("   obsolete ids from __EFMigrationsHistory (the last id is kept).");
+                Console.WriteLine("3. Test against a disposable database before production.");
+                return 0;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠️  Could not parse {Path.GetFileName(file)}: {ex.Message}");
+                Console.WriteLine($"❌ Error during migration merge: {ex.Message}");
+                Console.WriteLine("🔄 Restore from backup if needed");
+                return 1;
             }
         }
 
-        if (consolidatedUp.Length > 0)
+        // ---- Database update (optional) -----------------------------------------
+
+        private async Task<bool> UpdateDatabaseAsync()
         {
-            Console.WriteLine($"✅ Extracted schema from {migrationFiles.Count} migrations");
-            return consolidatedUp.ToString().TrimEnd();
+            Console.WriteLine("💾 Updating database (dotnet ef database update) ...");
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "dotnet",
+                    Arguments = $"ef database update --project \"{_projectPath}\" --context {_contextName}",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi)
+                    ?? throw new InvalidOperationException("Could not start 'dotnet'.");
+
+                var stdout = await proc.StandardOutput.ReadToEndAsync();
+                var stderr = await proc.StandardError.ReadToEndAsync();
+                await proc.WaitForExitAsync();
+
+                Console.Write(stdout);
+                if (!string.IsNullOrWhiteSpace(stderr)) Console.Error.Write(stderr);
+
+                if (proc.ExitCode != 0)
+                {
+                    Console.WriteLine("❌ 'dotnet ef database update' failed. Aborting so the database is not left inconsistent.");
+                    return false;
+                }
+
+                Console.WriteLine("✅ Database is up to date.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Could not update the database: {ex.Message}");
+                Console.WriteLine("   Make sure the EF Core tools are installed (dotnet tool install --global dotnet-ef).");
+                return false;
+            }
         }
 
-        Console.WriteLine("⚠️  No schema commands found in existing migrations");
-        return GenerateTodoSchema();
-    }
+        // ---- Backup --------------------------------------------------------------
 
-    private string ExtractUpMethodContent(string migrationContent)
-    {
-        try
+        private async Task CreateBackupAsync()
         {
-            // Find the Up method
-            var upMethodPattern = @"protected\s+override\s+void\s+Up\s*\(\s*MigrationBuilder\s+migrationBuilder\s*\)\s*{";
-            var match = Regex.Match(migrationContent, upMethodPattern);
+            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            var backupFolder = Path.Combine(_projectDirectory, $"MigrationsBackup_{timestamp}");
 
+            Console.WriteLine($"💾 Creating backup in: {backupFolder}");
+            Directory.CreateDirectory(backupFolder);
+
+            foreach (var file in Directory.GetFiles(_migrationsFolder, "*.cs"))
+            {
+                var fileName = Path.GetFileName(file);
+                // Keep backups outside the SDK's default **/*.cs compile glob via .bak suffix.
+                var backupPath = Path.Combine(backupFolder, $"{fileName}.bak");
+                File.Copy(file, backupPath);
+            }
+
+            Console.WriteLine($"✅ Backup created with {Directory.GetFiles(backupFolder).Length} files");
+            await Task.CompletedTask;
+        }
+
+        // ---- Model snapshot helpers ---------------------------------------------
+
+        private string GetModelSnapshot()
+        {
+            var snapshotFile = Directory.GetFiles(_migrationsFolder, "*ModelSnapshot.cs").FirstOrDefault();
+            if (snapshotFile != null && File.Exists(snapshotFile))
+            {
+                Console.WriteLine("📸 Found model snapshot");
+                return File.ReadAllText(snapshotFile);
+            }
+            Console.WriteLine("⚠️  No model snapshot found");
+            return string.Empty;
+        }
+
+        private static string GetEfCoreVersion(string modelSnapshot)
+        {
+            var match = Regex.Match(modelSnapshot,
+                @"\.HasAnnotation\(""ProductVersion"",\s*""([^""]+)""\)");
+            return match.Success ? match.Groups[1].Value : DefaultEfCoreVersion;
+        }
+
+        private string GetMigrationNamespace(string modelSnapshot)
+        {
+            var match = Regex.Match(modelSnapshot, @"\bnamespace\s+([^\s{;]+)");
+            return match.Success
+                ? match.Groups[1].Value
+                : $"{Path.GetFileNameWithoutExtension(_projectPath)}.Migrations";
+        }
+
+        private IReadOnlyList<string> GetMigrationUsingDirectives()
+        {
+            var usingDirectives = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var file in GetAllMigrationFiles()
+                         .Where(f => !f.EndsWith(".Designer.cs", StringComparison.Ordinal))
+                         .OrderBy(f => f))
+            {
+                var content = File.ReadAllText(file);
+                var nsMatch = Regex.Match(content, @"\bnamespace\b");
+                var header = nsMatch.Success ? content[..nsMatch.Index] : content;
+
+                foreach (var line in header.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+                {
+                    var directive = line.Trim();
+                    if (directive.StartsWith("using ", StringComparison.Ordinal)
+                        && directive.EndsWith(';')
+                        && seen.Add(directive))
+                    {
+                        usingDirectives.Add(directive);
+                    }
+                }
+            }
+            return usingDirectives;
+        }
+
+        // ---- Operation merging ---------------------------------------------------
+
+        private record MigrationOp(string Text, string Type, string Name, string Table)
+        {
+            public string Key => $"{Name}|{Table}";
+        }
+
+        private static readonly HashSet<string> DropTypes = new()
+        {
+            "DropTable", "DropIndex", "DropColumn", "DropForeignKey", "DropPrimaryKey", "DropCheckConstraint", "DropUniqueConstraint"
+        };
+        private static readonly HashSet<string> CreateTypes = new()
+        {
+            "CreateTable", "CreateIndex", "AddColumn", "AddForeignKey", "AddPrimaryKey", "CreateCheckConstraint", "AddUniqueConstraint"
+        };
+
+        private static string? FamilyOf(string type) => type switch
+        {
+            "CreateTable" or "DropTable" => "table",
+            "CreateIndex" or "DropIndex" => "index",
+            "AddColumn" or "DropColumn" => "column",
+            "AddForeignKey" or "DropForeignKey" => "fk",
+            "AddPrimaryKey" or "DropPrimaryKey" => "pk",
+            "AddUniqueConstraint" or "DropUniqueConstraint" => "uc",
+            "CreateCheckConstraint" or "DropCheckConstraint" => "cc",
+            _ => null
+        };
+
+        private static List<MigrationOp> SplitOperations(string body)
+        {
+            var ops = new List<MigrationOp>();
+            int i = 0, n = body.Length;
+            const string marker = "migrationBuilder.";
+            while (i < n)
+            {
+                int idx = body.IndexOf(marker, i, StringComparison.Ordinal);
+                if (idx < 0) break;
+                int p = body.IndexOf('(', idx);
+                if (p < 0) break;
+                string type = body.Substring(idx + marker.Length, p - (idx + marker.Length)).Trim();
+                int depth = 0, j = p;
+                for (; j < n; j++)
+                {
+                    char c = body[j];
+                    if (c is '(' or '{') depth++;
+                    else if (c is ')' or '}') depth--;
+                    else if (c == ';' && depth == 0) break;
+                }
+                if (j >= n) break;
+                string text = body.Substring(idx, j - idx + 1);
+                var nameM = Regex.Match(text, @"name:\s*""([^""]+)""");
+                var tableM = Regex.Match(text, @"table:\s*""([^""]+)""");
+                ops.Add(new MigrationOp(
+                    text,
+                    type,
+                    nameM.Success ? nameM.Groups[1].Value : "",
+                    tableM.Success ? tableM.Groups[1].Value : ""));
+                i = j + 1;
+            }
+            return ops;
+        }
+
+        /// <summary>
+        /// Merges Up bodies (chronological) and Down bodies (reverse) from all migrations,
+        /// removing exact-duplicate operations and cancelling create/drop pairs that net to
+        /// nothing (e.g. CreateTable(X) then DropTable(X) leaves X absent → both removed).
+        /// </summary>
+        private (string Up, string Down, int Merged, int Deduped, int Cancelled) MergeOperations(
+            List<MigrationInfo> migrations)
+        {
+            int deduped = 0, cancelled = 0;
+
+            // ----- UP: chronological -----
+            var upAcc = new List<(string Source, MigrationOp Op)>();
+            foreach (var m in migrations)
+            {
+                var content = File.ReadAllText(m.FilePath);
+                var upBody = ExtractMethodBody(content, "Up");
+                foreach (var op in SplitOperations(upBody))
+                    AddOp(upAcc, m.Id, op, ref deduped, ref cancelled);
+            }
+
+            // ----- DOWN: reverse chronological -----
+            // Apply exact-duplicate removal AND create/drop cancellation, same as Up.
+            // A create-then-drop of the same object inside Down is a no-op, so removing
+            // both keeps the rollback correct and clean.
+            var downAcc = new List<(string Source, MigrationOp Op)>();
+            foreach (var m in migrations.AsEnumerable().Reverse())
+            {
+                var content = File.ReadAllText(m.FilePath);
+                var downBody = ExtractMethodBody(content, "Down");
+                foreach (var op in SplitOperations(downBody))
+                    AddOp(downAcc, m.Id, op, ref deduped, ref cancelled);
+            }
+
+            return (RenderBody(upAcc), RenderBody(downAcc), migrations.Count, deduped, cancelled);
+        }
+
+        private static void AddOp(
+            List<(string Source, MigrationOp Op)> acc, string source, MigrationOp op,
+            ref int deduped, ref int cancelled)
+        {
+            // Exact duplicate -> drop.
+            if (acc.Any(x => x.Op.Text == op.Text)) { deduped++; return; }
+
+            // Create/drop cancellation: if the opposite already exists for the same object,
+            // the later op wins and the earlier opposite is removed — both net to nothing,
+            // so neither is emitted.
+            var fam = FamilyOf(op.Type);
+            if (fam != null && (CreateTypes.Contains(op.Type) || DropTypes.Contains(op.Type)))
+            {
+                bool isDrop = DropTypes.Contains(op.Type);
+                int idx = acc.FindIndex(x =>
+                    FamilyOf(x.Op.Type) == fam && x.Op.Key == op.Key && DropTypes.Contains(x.Op.Type) != isDrop);
+                if (idx >= 0)
+                {
+                    acc.RemoveAt(idx);
+                    cancelled++;
+                    return; // current op is the inverse of the removed one -> net nothing
+                }
+            }
+            acc.Add((source, op));
+        }
+
+        private static string RenderBody(List<(string Source, MigrationOp Op)> ops)
+        {
+            var sb = new StringBuilder();
+            string? current = null;
+            foreach (var (source, op) in ops)
+            {
+                if (source != current)
+                {
+                    sb.AppendLine($"            /* These operations come from {source} */");
+                    current = source;
+                }
+                foreach (var line in op.Text.Replace(Environment.NewLine, "\n").Split('\n'))
+                {
+                    // Re-indent each operation line to a clean 12-space base.
+                    var trimmed = line.Trim();
+                    sb.AppendLine(string.IsNullOrEmpty(trimmed) ? "" : "            " + trimmed);
+                }
+                sb.AppendLine();
+            }
+            return sb.ToString().TrimEnd();
+        }
+
+        // ---- Method body extraction ---------------------------------------------
+
+        private static string ExtractMethodBody(string migrationContent, string methodName)
+        {
+            var pattern = methodName == "Up"
+                ? @"protected\s+override\s+void\s+Up\s*\(\s*MigrationBuilder\s+migrationBuilder\s*\)\s*{"
+                : @"protected\s+override\s+void\s+Down\s*\(\s*MigrationBuilder\s+migrationBuilder\s*\)\s*{";
+            var match = Regex.Match(migrationContent, pattern);
             if (!match.Success) return string.Empty;
 
-            var braceStart = match.Index + match.Length - 1;
-            var braceCount = 1;
-            var pos = braceStart + 1;
-
-            while (pos < migrationContent.Length && braceCount > 0)
+            int braceStart = match.Index + match.Length - 1;
+            int depth = 1, pos = braceStart + 1;
+            while (pos < migrationContent.Length && depth > 0)
             {
-                if (migrationContent[pos] == '{') braceCount++;
-                else if (migrationContent[pos] == '}') braceCount--;
+                if (migrationContent[pos] == '{') depth++;
+                else if (migrationContent[pos] == '}') depth--;
                 pos++;
             }
-
-            if (braceCount == 0)
-            {
-                var methodContent = migrationContent.Substring(braceStart + 1, pos - braceStart - 2);
-                return methodContent.Trim();
-            }
+            if (depth != 0) return string.Empty;
+            return migrationContent.Substring(braceStart + 1, pos - braceStart - 2).Trim();
         }
-        catch (Exception)
+
+        // ---- Writing the merged migration + designer ----------------------------
+
+        private async Task WriteMergedMigrationAsync(
+            MigrationInfo last, string upBody, string downBody,
+            string migrationNamespace, IReadOnlyList<string> usingDirectives)
         {
-            // Fallback to simpler method
-        }
+            Console.WriteLine($"📝 Rewriting last migration: {last.Id}");
 
-        return string.Empty;
-    }
+            var usings = new[] { "using Microsoft.EntityFrameworkCore.Migrations;" }
+                .Concat(usingDirectives)
+                .Distinct(StringComparer.Ordinal);
+            var usingBlock = string.Join(Environment.NewLine, usings);
 
-
-
-    private void RemoveOldMigrations()
-    {
-        Console.WriteLine("🗑️  Removing old migration files...");
-
-        var filesToRemove = GetMigrationFiles();
-        foreach (var file in filesToRemove)
-        {
-            Console.WriteLine($"   Removing: {Path.GetFileName(file)}");
-            File.Delete(file);
-        }
-
-        Console.WriteLine($"✅ Removed {filesToRemove.Count} migration files");
-    }
-
-    private async Task<string> CreateConsolidatedMigrationAsync(
-        string migrationName,
-        string extractedSchema,
-        string extractedDown,
-        string modelSnapshot,
-        string efCoreVersion,
-        string migrationNamespace,
-        IReadOnlyList<string> migrationUsingDirectives)
-    {
-        Console.WriteLine($"📝 Creating consolidated migration: {migrationName}");
-
-        var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
-        var className = $"{timestamp}_{migrationName}";
-
-        var migrationContent = GenerateConsolidatedMigrationContent(
-            migrationName,
-            extractedSchema,
-            extractedDown,
-            migrationNamespace,
-            migrationUsingDirectives);
-        var migrationFile = Path.Combine(_migrationsFolder, $"{className}.cs");
-
-        await File.WriteAllTextAsync(migrationFile, migrationContent);
-        Console.WriteLine($"✅ Created: {Path.GetFileName(migrationFile)}");
-
-        // Create designer file
-        var designerContent = GenerateDesignerContent(
-            className,
-            migrationName,
-            modelSnapshot,
-            efCoreVersion,
-            migrationNamespace);
-        var designerFile = Path.Combine(_migrationsFolder, $"{className}.Designer.cs");
-        await File.WriteAllTextAsync(designerFile, designerContent);
-        Console.WriteLine($"✅ Created: {Path.GetFileName(designerFile)}");
-        return className;
-    }
-
-    private static string GenerateConsolidatedMigrationContent(
-        string migrationName,
-        string extractedSchema,
-        string extractedDown,
-        string migrationNamespace,
-        IReadOnlyList<string> migrationUsingDirectives)
-    {
-        var usingDirectives = new[] { "using Microsoft.EntityFrameworkCore.Migrations;" }
-            .Concat(migrationUsingDirectives)
-            .Distinct(StringComparer.Ordinal);
-        var usingBlock = string.Join(Environment.NewLine, usingDirectives);
-
-        return $@"{usingBlock}
+            var content = $@"{usingBlock}
 
 #nullable disable
 
 namespace {migrationNamespace}
 {{
     /// <inheritdoc />
-    public partial class {migrationName} : Migration
+    public partial class {last.Name} : Migration
     {{
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {{
-{extractedSchema}
+{upBody}
         }}
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {{
-{extractedDown}
+{downBody}
         }}
     }}
 }}";
-    }
 
-    private string ExtractDownMethodsAsync()
-    {
-        var migrationFiles = GetMigrationFiles()
-            .Where(f => !f.EndsWith(".Designer.cs"))
-            .OrderByDescending(f => f) // Reverse order for Down methods
-            .ToList();
+            await File.WriteAllTextAsync(last.FilePath, content);
+            Console.WriteLine($"✅ Updated: {Path.GetFileName(last.FilePath)}");
+        }
 
-        var consolidatedDown = new StringBuilder();
-        var hasExtractedDowns = false;
-
-        // First pass: try to extract actual Down methods
-        foreach (var file in migrationFiles)
+        private async Task WriteDesignerAsync(
+            MigrationInfo last, string modelSnapshot, string efCoreVersion, string migrationNamespace)
         {
-            try
+            if (last.DesignerPath == null)
             {
-                var content = File.ReadAllText(file);
-                var downMethodContent = ExtractDownMethodContent(content);
+                last = last with { DesignerPath = Path.Combine(_migrationsFolder, last.Id + ".Designer.cs") };
+            }
+            var designerContent = GenerateDesignerContent(last.Name, last.Id, modelSnapshot, efCoreVersion, migrationNamespace);
+            await File.WriteAllTextAsync(last.DesignerPath, designerContent);
+            Console.WriteLine($"✅ Updated: {Path.GetFileName(last.DesignerPath)}");
+        }
 
-                if (!string.IsNullOrWhiteSpace(downMethodContent))
+        private string GenerateDesignerContent(
+            string className, string migrationId, string modelSnapshot,
+            string efCoreVersion, string migrationNamespace)
+        {
+            if (!string.IsNullOrWhiteSpace(modelSnapshot))
+            {
+                try
                 {
-                    var fileName = Path.GetFileNameWithoutExtension(file);
-                    consolidatedDown.AppendLine($"            // From {fileName}");
-                    consolidatedDown.AppendLine("            {");
-                    consolidatedDown.AppendLine(downMethodContent);
-                    consolidatedDown.AppendLine("            }");
-                    consolidatedDown.AppendLine();
-                    hasExtractedDowns = true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️  Could not extract Down from {Path.GetFileName(file)}: {ex.Message}");
-            }
-        }
-
-        // If we found actual Down methods, return them
-        if (hasExtractedDowns)
-        {
-            return consolidatedDown.ToString().TrimEnd();
-        }
-
-        // Second pass: if no Down methods found, generate inverse operations from Up methods
-        var generatedDownOps = new StringBuilder();
-        var dropTableOps = new List<string>();
-
-        foreach (var file in migrationFiles)
-        {
-            try
-            {
-                var content = File.ReadAllText(file);
-                var upMethodContent = ExtractUpMethodContent(content);
-
-                if (!string.IsNullOrWhiteSpace(upMethodContent))
-                {
-                    var fileName = Path.GetFileNameWithoutExtension(file);
-
-                    // Extract and reverse DropIndex operations to CreateIndex
-                    var dropIndexMatches = Regex.Matches(upMethodContent, @"migrationBuilder\.DropIndex\(\s*name:\s*""([^""]+)""[^)]*\);");
-                    foreach (Match match in dropIndexMatches)
+                    var buildModelMatch = Regex.Match(modelSnapshot,
+                        @"protected\s+override\s+void\s+BuildModel\s*\(\s*ModelBuilder\s+modelBuilder\s*\)\s*{");
+                    if (buildModelMatch.Success)
                     {
-                        generatedDownOps.AppendLine($"            // From {fileName} - Recreate dropped index");
-                        generatedDownOps.AppendLine($"            migrationBuilder.CreateIndex(");
-                        generatedDownOps.AppendLine($"                name: \"{match.Groups[1].Value}\");");
-                    }
-
-                    // Extract and reverse DropColumn operations to AddColumn
-                    var dropColumnMatches = Regex.Matches(upMethodContent, @"migrationBuilder\.DropColumn\(\s*name:\s*""([^""]+)"",\s*table:\s*""([^""]+)""");
-                    foreach (Match match in dropColumnMatches)
-                    {
-                        generatedDownOps.AppendLine($"            // From {fileName} - Recreate dropped column");
-                        generatedDownOps.AppendLine($"            migrationBuilder.AddColumn<string>(");
-                        generatedDownOps.AppendLine($"                name: \"{match.Groups[1].Value}\",");
-                        generatedDownOps.AppendLine($"                table: \"{match.Groups[2].Value}\",");
-                        generatedDownOps.AppendLine($"                type: \"nvarchar(max)\",");
-                        generatedDownOps.AppendLine($"                nullable: false,");
-                        generatedDownOps.AppendLine($"                defaultValue: \"\");");
-                        generatedDownOps.AppendLine();
-                    }
-
-                    // Extract CreateTable operations to generate DropTable
-                    var createTableMatches = Regex.Matches(upMethodContent, @"migrationBuilder\.CreateTable\(\s*name:\s*""([^""]+)""");
-                    foreach (Match match in createTableMatches)
-                    {
-                        dropTableOps.Add(match.Groups[1].Value);
-                    }
-
-                    // Extract CreateIndex operations to generate DropIndex
-                    var createIndexMatches = Regex.Matches(upMethodContent, @"migrationBuilder\.CreateIndex\(\s*name:\s*""([^""]+)""");
-                    foreach (Match match in createIndexMatches)
-                    {
-                        generatedDownOps.AppendLine($"            // From {fileName} - Drop created index");
-                        generatedDownOps.AppendLine($"            migrationBuilder.DropIndex(");
-                        generatedDownOps.AppendLine($"                name: \"{match.Groups[1].Value}\",");
-                        generatedDownOps.AppendLine($"                table: \"\");");
-                        generatedDownOps.AppendLine();
-                    }
-
-                    // Extract AddColumn operations to generate DropColumn
-                    var addColumnMatches = Regex.Matches(upMethodContent, @"migrationBuilder\.AddColumn<[^>]*>\(\s*name:\s*""([^""]+)"",\s*table:\s*""([^""]+)""");
-                    foreach (Match match in addColumnMatches)
-                    {
-                        generatedDownOps.AppendLine($"            // From {fileName} - Drop added column");
-                        generatedDownOps.AppendLine($"            migrationBuilder.DropColumn(");
-                        generatedDownOps.AppendLine($"                name: \"{match.Groups[1].Value}\",");
-                        generatedDownOps.AppendLine($"                table: \"{match.Groups[2].Value}\");");
-                        generatedDownOps.AppendLine();
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️  Could not process {Path.GetFileName(file)}: {ex.Message}");
-            }
-        }
-
-        // Add drop table operations at the end (in reverse order)
-        if (dropTableOps.Count > 0)
-        {
-            generatedDownOps.AppendLine("            // Drop tables in reverse order of creation");
-            foreach (var tableName in dropTableOps.Reverse<string>())
-            {
-                generatedDownOps.AppendLine($"            migrationBuilder.DropTable(");
-                generatedDownOps.AppendLine($"                name: \"{tableName}\");");
-                generatedDownOps.AppendLine();
-            }
-        }
-
-        return generatedDownOps.Length > 0 ? generatedDownOps.ToString().TrimEnd() : string.Empty;
-    }
-
-    private string ExtractDownMethodContent(string migrationContent)
-    {
-        try
-        {
-            // Find the Down method
-            var downMethodPattern = @"protected\s+override\s+void\s+Down\s*\(\s*MigrationBuilder\s+migrationBuilder\s*\)\s*{";
-            var match = Regex.Match(migrationContent, downMethodPattern);
-
-            if (!match.Success) return string.Empty;
-
-            var braceStart = match.Index + match.Length - 1;
-            var braceCount = 1;
-            var pos = braceStart + 1;
-
-            while (pos < migrationContent.Length && braceCount > 0)
-            {
-                if (migrationContent[pos] == '{') braceCount++;
-                else if (migrationContent[pos] == '}') braceCount--;
-                pos++;
-            }
-
-            if (braceCount == 0)
-            {
-                var methodContent = migrationContent.Substring(braceStart + 1, pos - braceStart - 2);
-                return methodContent.Trim();
-            }
-        }
-        catch (Exception)
-        {
-            // Fallback
-        }
-
-        return string.Empty;
-    }
-
-    private string GenerateTodoSchema()
-    {
-        return @"            // TODO: Add your table creation commands here
-            // 
-            // The automatic extraction didn't find schema commands.
-            // 
-            // To populate this migration:
-            // 1. Look in your backup folder (MigrationsBackup_*) 
-            // 2. Copy CreateTable commands from your original migrations
-            // 3. Or generate a new migration temporarily to see the full schema
-            //
-            // Example:
-            /*
-            migrationBuilder.CreateTable(
-                name: ""Users"",
-                columns: table => new
-                {
-                    Id = table.Column<int>(type: ""int"", nullable: false)
-                        .Annotation(""SqlServer:Identity"", ""1, 1""),
-                    Name = table.Column<string>(type: ""nvarchar(max)"", nullable: false),
-                    Email = table.Column<string>(type: ""nvarchar(max)"", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey(""PK_Users"", x => x.Id);
-                });
-            */
-            
-            throw new NotImplementedException(""Please add your table creation commands to this migration."");";
-    }
-
-    private string GenerateDesignerContent(
-        string className,
-        string migrationName,
-        string modelSnapshot,
-        string efCoreVersion,
-        string migrationNamespace)
-    {
-        // If we have a model snapshot, extract the BuildModel method content
-        if (!string.IsNullOrWhiteSpace(modelSnapshot))
-        {
-            try
-            {
-                var buildModelMatch = Regex.Match(modelSnapshot, @"protected\s+override\s+void\s+BuildModel\s*\(\s*ModelBuilder\s+modelBuilder\s*\)\s*{");
-                if (buildModelMatch.Success)
-                {
-                    var buildModelContent = ExtractBracedBody(modelSnapshot, buildModelMatch);
-                    buildModelContent = Regex.Replace(
-                        buildModelContent,
-                        @"\.HasAnnotation\(""ProductVersion"",\s*""[^""]+""\)",
-                        $@".HasAnnotation(""ProductVersion"", ""{efCoreVersion}"")");
-                    var snapshotHeader = modelSnapshot[..buildModelMatch.Index];
-                    var generatedUsings = new HashSet<string>(StringComparer.Ordinal)
-                    {
-                        "using System;",
-                        "using Microsoft.EntityFrameworkCore;",
-                        "using Microsoft.EntityFrameworkCore.Infrastructure;",
-                        "using Microsoft.EntityFrameworkCore.Metadata;",
-                        "using Microsoft.EntityFrameworkCore.Migrations;",
-                        "using Microsoft.EntityFrameworkCore.Storage.ValueConversion;"
-                    };
-                    var usingDirectives = string.Join(Environment.NewLine,
-                        snapshotHeader.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
-                            .Where(line => line.TrimStart().StartsWith("using ", StringComparison.Ordinal))
-                            .Where(line => !generatedUsings.Contains(line.Trim()))
-                            .Distinct());
-                    return $@"// <auto-generated />
+                        var buildModelContent = ExtractBracedBody(modelSnapshot, buildModelMatch);
+                        buildModelContent = Regex.Replace(
+                            buildModelContent,
+                            @"\.HasAnnotation\(""ProductVersion"",\s*""[^""]+""\)",
+                            $@".HasAnnotation(""ProductVersion"", ""{efCoreVersion}"")");
+                        var snapshotHeader = modelSnapshot[..buildModelMatch.Index];
+                        var generatedUsings = new HashSet<string>(StringComparer.Ordinal)
+                        {
+                            "using System;",
+                            "using Microsoft.EntityFrameworkCore;",
+                            "using Microsoft.EntityFrameworkCore.Infrastructure;",
+                            "using Microsoft.EntityFrameworkCore.Metadata;",
+                            "using Microsoft.EntityFrameworkCore.Migrations;",
+                            "using Microsoft.EntityFrameworkCore.Storage.ValueConversion;"
+                        };
+                        var usingDirectives = string.Join(Environment.NewLine,
+                            snapshotHeader.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None)
+                                .Where(line => line.TrimStart().StartsWith("using ", StringComparison.Ordinal))
+                                .Where(line => !generatedUsings.Contains(line.Trim()))
+                                .Distinct());
+                        return $@"// <auto-generated />
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
@@ -633,8 +581,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace {migrationNamespace}
 {{
     [DbContext(typeof({_contextName}))]
-    [Migration(""{className}"")]
-    partial class {migrationName}
+    [Migration(""{migrationId}"")]
+    partial class {className}
     {{
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -642,16 +590,15 @@ namespace {migrationNamespace}
         }}
     }}
 }}";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️  Could not parse model snapshot: {ex.Message}");
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"⚠️  Could not parse model snapshot: {ex.Message}");
-            }
-        }
 
-        // Fallback to template
-        return $@"// <auto-generated />
+            return $@"// <auto-generated />
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
@@ -663,123 +610,89 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace {migrationNamespace}
 {{
     [DbContext(typeof({_contextName}))]
-    [Migration(""{className}"")]
-    partial class {migrationName}
+    [Migration(""{migrationId}"")]
+    partial class {className}
     {{
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {{
-            // TODO: This should match your current model
-            // You can copy this from your model snapshot or latest migration's Designer file
-            
             modelBuilder
                 .HasAnnotation(""ProductVersion"", ""{efCoreVersion}"")
                 .HasAnnotation(""Relational:MaxIdentifierLength"", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
-                
-            // Add your model configuration here
         }}
     }}
 }}";
-    }
-
-    private static string ExtractBracedBody(string content, Match signatureMatch)
-    {
-        var braceStart = signatureMatch.Index + signatureMatch.Length - 1;
-        var depth = 1;
-
-        for (var position = braceStart + 1; position < content.Length; position++)
-        {
-            if (content[position] == '{') depth++;
-            else if (content[position] == '}') depth--;
-
-            if (depth == 0)
-                return content.Substring(braceStart + 1, position - braceStart - 1);
         }
 
-        throw new InvalidDataException("The model snapshot contains an incomplete BuildModel method.");
-    }
+        private static string ExtractBracedBody(string content, System.Text.RegularExpressions.Match signatureMatch)
+        {
+            var braceStart = signatureMatch.Index + signatureMatch.Length - 1;
+            var depth = 1;
+            for (var position = braceStart + 1; position < content.Length; position++)
+            {
+                if (content[position] == '{') depth++;
+                else if (content[position] == '}') depth--;
+                if (depth == 0)
+                    return content.Substring(braceStart + 1, position - braceStart - 1);
+            }
+            throw new InvalidDataException("The model snapshot contains an incomplete BuildModel method.");
+        }
 
-    private void GenerateDatabaseUpdateScript(string migrationName, string migrationId, string efCoreVersion)
-    {
-        var scriptContent = $@"-- ===============================================
--- EF Core Migration Squash - Database Update Script
--- Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC
--- Migration: {migrationName}
--- Author: AmirTahan80
--- ===============================================
---
--- This script updates existing databases after migration squashing.
--- 
--- ⚠️  IMPORTANT INSTRUCTIONS:
--- 1. BACKUP your database before running this script
--- 2. This script is for databases that already have your schema
--- 3. Do NOT run this on new/empty databases
--- 4. Test on a development database first
---
--- ===============================================
+        // ---- History cleanup script ---------------------------------------------
 
-PRINT 'Starting EF Core Migration History Update...';
-PRINT 'Migration: {migrationName}';
-PRINT 'Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC';
-PRINT '';
+        private void GenerateHistoryCleanupScript(
+            MigrationInfo last, List<MigrationInfo> removed, string efCoreVersion)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("-- ===============================================");
+            sb.AppendLine("-- EF Core Migration Merge - History Cleanup Script");
+            sb.AppendLine($"-- Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+            sb.AppendLine($"-- Kept migration (already applied): {last.Id}");
+            sb.AppendLine("-- Author: AmirTahan80");
+            sb.AppendLine("-- ===============================================");
+            sb.AppendLine("--");
+            sb.AppendLine("-- This script only removes the migration ids that were folded into");
+            sb.AppendLine("-- the last migration. The schema is NOT changed.");
+            sb.AppendLine("--");
+            sb.AppendLine("-- ⚠️  BACKUP your database before running this script.");
+            sb.AppendLine("-- ===============================================");
+            sb.AppendLine();
+            sb.AppendLine("PRINT 'Starting EF Core migration history cleanup...';");
+            sb.AppendLine();
+            sb.AppendLine("-- Step 1: Review current history");
+            sb.AppendLine("SELECT MigrationId, ProductVersion FROM __EFMigrationsHistory ORDER BY MigrationId;");
+            sb.AppendLine();
 
--- Step 1: Check current migration state
-PRINT '=== Current Migration History ===';
-IF EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '__EFMigrationsHistory')
-BEGIN
-    SELECT MigrationId, ProductVersion FROM __EFMigrationsHistory ORDER BY MigrationId;
-END
-ELSE
-BEGIN
-    PRINT 'No __EFMigrationsHistory table found. This might be a new database.';
-END
+            if (removed.Count > 0)
+            {
+                sb.AppendLine("-- Step 2: Remove the folded-away migration ids (the last one is kept).");
+                sb.AppendLine("-- Uncomment after backup:");
+                sb.AppendLine("-- DELETE FROM __EFMigrationsHistory");
+                sb.AppendLine("-- WHERE MigrationId IN (");
+                for (int i = 0; i < removed.Count; i++)
+                {
+                    var comma = i < removed.Count - 1 ? "," : "";
+                    sb.AppendLine($"--   '{removed[i].Id}'{comma}");
+                }
+                sb.AppendLine("-- );");
+                sb.AppendLine();
+            }
+            else
+            {
+                sb.AppendLine("-- Nothing to remove: only one migration existed.");
+                sb.AppendLine();
+            }
 
-PRINT '';
-PRINT '=== Updating Migration History ===';
+            sb.AppendLine("-- Step 3: Verify (the kept migration should remain)");
+            sb.AppendLine("SELECT MigrationId, ProductVersion FROM __EFMigrationsHistory ORDER BY MigrationId;");
+            sb.AppendLine();
+            sb.AppendLine("PRINT 'History cleanup completed. Schema unchanged.';");
 
--- Step 2: Clear old migration history (UNCOMMENT AFTER BACKUP!)
--- ⚠️  UNCOMMENT THE NEXT LINE ONLY AFTER YOU'VE BACKED UP YOUR DATABASE
--- DELETE FROM __EFMigrationsHistory WHERE MigrationId LIKE '%[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_%';
-
--- Step 3: Add the new consolidated migration as 'applied'
--- This tells EF Core that this migration has already been applied to this database
-INSERT INTO __EFMigrationsHistory (MigrationId, ProductVersion) 
-VALUES ('{migrationId}', '{efCoreVersion}');
-
--- Step 4: Verify the update
-PRINT '';
-PRINT '=== Updated Migration History ===';
-SELECT MigrationId, ProductVersion FROM __EFMigrationsHistory ORDER BY MigrationId;
-
-PRINT '';
-PRINT 'Migration history update completed successfully!';
-PRINT 'Your database now recognizes the consolidated migration: {migrationName}';
-
--- ===============================================
--- VERIFICATION QUERIES
--- ===============================================
--- Run these to verify your database state:
-
--- Check table count
-SELECT COUNT(*) as TableCount FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE';
-
--- Check migration history
-SELECT COUNT(*) as MigrationCount FROM __EFMigrationsHistory;
-
--- ===============================================
--- NOTES:
--- - The consolidated migration file will handle new database creation
--- - This script only updates the migration tracking for existing databases  
--- - If you encounter issues, restore from backup and open a GitHub issue
--- - Test thoroughly before applying to production!
--- ===============================================
-";
-
-        var scriptFile = Path.Combine(_migrationsFolder, "UpdateExistingDatabases.sql");
-        File.WriteAllText(scriptFile, scriptContent);
-
-        Console.WriteLine($"📄 Generated database update script: {Path.GetFileName(scriptFile)}");
+            var scriptFile = Path.Combine(_migrationsFolder, "UpdateExistingDatabases.sql");
+            File.WriteAllText(scriptFile, sb.ToString());
+            Console.WriteLine($"📄 Generated history cleanup script: {Path.GetFileName(scriptFile)}");
+        }
     }
 }
