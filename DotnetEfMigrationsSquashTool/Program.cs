@@ -20,18 +20,24 @@ namespace EfMigrationSquasher
             {
                 DefaultValueFactory = (s) => false
             };
+            var updateDbOption = new Option<bool>("--update-database")
+            {
+                DefaultValueFactory = (s) => false
+            };
 
             // Set descriptions separately
             projectOption.Description = "Path to the project file containing DbContext";
             contextOption.Description = "DbContext class name";
-            nameOption.Description = "Name for the new consolidated migration";
+            nameOption.Description = "Name for the merged migration (kept as the last existing migration id)";
             dryRunOption.Description = "Show what would be done without making changes";
+            updateDbOption.Description = "Update the database (dotnet ef database update) before merging migrations";
             migrationOption.Description = "Directory containing the Migrations folder";
 
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(contextOption);
             rootCommand.Options.Add(nameOption);
             rootCommand.Options.Add(dryRunOption);
+            rootCommand.Options.Add(updateDbOption);
             rootCommand.Options.Add(migrationOption);
 
             rootCommand.SetAction(async (parseResult) =>
@@ -40,9 +46,10 @@ namespace EfMigrationSquasher
                 var context = parseResult.GetValue(contextOption);
                 var name = parseResult.GetValue(nameOption);
                 var dryRun = parseResult.GetValue(dryRunOption);
+                var updateDb = parseResult.GetValue(updateDbOption);
                 var migration = parseResult.GetValue(migrationOption);
 
-                return await SquashHelper.SquashMigrationsAsync(project!, context!, migration!, name!, dryRun);
+                return await SquashHelper.SquashMigrationsAsync(project!, context!, migration!, name!, dryRun, updateDb);
             });
 
             ParseResult parseResult = rootCommand.Parse(args);

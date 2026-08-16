@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-16
+
+### Changed
+- **Merge into the LAST existing migration instead of creating a new one.** The last
+  migration keeps its original id/timestamp, so databases that already have that id in
+  `__EFMigrationsHistory` are never affected (no pending migration is created). This
+  fixes the previous behavior where a brand-new migration id made EF try to re-apply
+  the whole schema against existing databases.
+- Add `--update-database` flag (and an interactive prompt) to run
+  `dotnet ef database update` *before* merging files.
+- Each merged block is prefixed with `/* These operations come from <migrationId> */`.
+- Strip the 14-digit timestamp from the generated class name (kept only in the
+  `[Migration]` attribute), matching EF's own convention so the output compiles.
+
+### Added
+- Exact-duplicate operation removal (e.g. the same `CreateIndex` in two migrations).
+- Create/drop cancellation: a `CreateX` immediately followed by `DropX` on the same
+  object nets to nothing and is dropped from both `Up` and `Down`.
+
 ## [1.1.0] - 2026-07-14
 
 ### Changed
