@@ -69,7 +69,7 @@ ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbCo
 | --- | --- | --- |
 | `--project` | Yes | Path to the target `.csproj` file. |
 | `--context` | Yes | `DbContext` class name used by the generated designer. |
-| `--migration-root` | Yes | Directory that directly contains the `Migrations` folder. |
+| `--migration-root` | No | Directory containing the `Migrations` folder (defaults to `--project` directory). |
 | `--name` | No | New migration class name. Defaults to `ConsolidatedMigration`. |
 | `--dry-run` | No | Shows what would change without writing or deleting files. |
 | `--help` | No | Displays CLI help. |
