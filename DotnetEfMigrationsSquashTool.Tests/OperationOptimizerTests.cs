@@ -201,4 +201,49 @@ migrationBuilder.CreateTable(
         Assert.Null(m1.UpBody);
         Assert.Null(m2.UpBody);
     }
+
+    [Fact]
+    public void Optimize_RetainsDroppedTable_WhenReferencedBySurvivingTableForeignKey()
+    {
+        var m1 = new ParsedMigration
+        {
+            FileName = "20260101_Init.cs",
+            MigrationId = "20260101_Init",
+            ClassName = "Init",
+            UpBody = @"
+migrationBuilder.CreateTable(
+    name: ""Categories"",
+    columns: table => new { Id = table.Column<int>() });
+
+migrationBuilder.CreateTable(
+    name: ""Products"",
+    columns: table => new { Id = table.Column<int>(), CategoryId = table.Column<int>() },
+    constraints: table =>
+    {
+        table.ForeignKey(
+            name: ""FK_Products_Categories"",
+            column: x => x.CategoryId,
+            principalTable: ""Categories"",
+            principalColumn: ""Id"");
+    });"
+        };
+
+        var m2 = new ParsedMigration
+        {
+            FileName = "20260102_DropCat.cs",
+            MigrationId = "20260102_DropCat",
+            ClassName = "DropCat",
+            UpBody = @"migrationBuilder.DropTable(name: ""Categories"");"
+        };
+
+        var migrations = new List<ParsedMigration> { m1, m2 };
+
+        var result = OperationOptimizer.Optimize(migrations);
+
+        // Categories must NOT be pruned because surviving Products table has a FK referencing it
+        Assert.Equal(0, result.PrunedOperationsCount);
+        Assert.Single(result.RetainedMessages);
+        Assert.Contains("Categories", result.RetainedMessages[0]);
+        Assert.Contains("referenced by surviving table 'Products'", result.RetainedMessages[0]);
+    }
 }

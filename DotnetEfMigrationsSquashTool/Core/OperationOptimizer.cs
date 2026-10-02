@@ -22,7 +22,7 @@ public class MigrationOperation
     public string? TableName { get; init; }
     public string? ColumnName { get; init; }
     public string? IndexName { get; init; }
-    public string? PrincipalTable { get; init; }
+    public List<string> PrincipalTables { get; init; } = new();
     public string? SqlText { get; init; }
     public required string MigrationId { get; init; }
     public required int MigrationIndex { get; init; }
@@ -86,10 +86,10 @@ public static class OperationOptimizer
 
                     // Safety Check 2: Does any surviving table reference this table via Foreign Key?
                     var survivingFk = allOps.FirstOrDefault(o =>
-                        o.OperationType == "CreateTable"
+                        (o.OperationType == "CreateTable" || o.OperationType == "AddForeignKey")
                         && !string.Equals(o.TableName, tableName, StringComparison.OrdinalIgnoreCase)
                         && !droppedTables.ContainsKey(o.TableName ?? "")
-                        && string.Equals(o.PrincipalTable, tableName, StringComparison.OrdinalIgnoreCase));
+                        && o.PrincipalTables.Any(pt => string.Equals(pt, tableName, StringComparison.OrdinalIgnoreCase)));
 
                     if (survivingFk != null)
                     {
@@ -263,13 +263,29 @@ class Wrapper {{
                 case "CreateTable":
                 {
                     var tableName = GetStringArg(args, "name", 0);
-                    var principalTable = ExtractPrincipalTableFromForeignKeys(invocation);
+                    var principalTables = ExtractPrincipalTablesFromForeignKeys(invocation);
                     return new MigrationOperation
                     {
                         Statement = statement,
                         OperationType = "CreateTable",
                         TableName = tableName,
-                        PrincipalTable = principalTable,
+                        PrincipalTables = principalTables,
+                        MigrationId = migrationId,
+                        MigrationIndex = migrationIndex
+                    };
+                }
+
+                case "AddForeignKey":
+                {
+                    var tableName = GetStringArg(args, "table", -1);
+                    var principalTable = GetStringArg(args, "principalTable", -1);
+                    var list = !string.IsNullOrWhiteSpace(principalTable) ? new List<string> { principalTable } : new List<string>();
+                    return new MigrationOperation
+                    {
+                        Statement = statement,
+                        OperationType = "AddForeignKey",
+                        TableName = tableName,
+                        PrincipalTables = list,
                         MigrationId = migrationId,
                         MigrationIndex = migrationIndex
                     };
@@ -372,8 +388,9 @@ class Wrapper {{
         };
     }
 
-    private static string? ExtractPrincipalTableFromForeignKeys(InvocationExpressionSyntax createTableInvocation)
+    private static List<string> ExtractPrincipalTablesFromForeignKeys(InvocationExpressionSyntax createTableInvocation)
     {
+        var list = new List<string>();
         // Search inside CreateTable for foreignKey lambdas: table => table.ForeignKey(..., principalTable: "TargetTable")
         var foreignKeyInvocations = createTableInvocation.DescendantNodes()
             .OfType<InvocationExpressionSyntax>()
@@ -384,11 +401,11 @@ class Wrapper {{
             var principalTable = GetStringArg(fk.ArgumentList.Arguments, "principalTable", -1);
             if (!string.IsNullOrWhiteSpace(principalTable))
             {
-                return principalTable;
+                list.Add(principalTable);
             }
         }
 
-        return null;
+        return list;
     }
 
     private static string? RebuildBodyExcludingPruned(string bodyCode, HashSet<StatementSyntax> prunedStatements)
