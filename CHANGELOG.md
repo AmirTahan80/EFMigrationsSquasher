@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Automated xUnit test suite (`DotnetEfMigrationsSquashTool.Tests`) covering migration parsing, down synthesis, file filtering, and return-statement isolation.
 - Automatic preservation of helper methods, constants, and custom class members from original migrations into the consolidated migration.
 - Safe execution isolation for migration bodies containing early `return;` statements.
+- Safe redundant operation pruning with `--optimize` flag, automatically removing tables, columns, and indexes that were created and subsequently dropped while guarding against raw SQL references and foreign key constraints.
 - Multi-database guidance and script templates for PostgreSQL, SQLite, and MySQL in `UpdateExistingDatabases.sql`.
 
 ### Changed

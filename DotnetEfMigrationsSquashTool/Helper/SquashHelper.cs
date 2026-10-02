@@ -10,7 +10,8 @@ public static class SquashHelper
         string contextName,
         string? migrationRoot,
         string migrationName,
-        bool dryRun)
+        bool dryRun,
+        bool optimize = false)
     {
         try
         {
@@ -85,11 +86,11 @@ public static class SquashHelper
 
             if (dryRun)
             {
-                await migrationSquasher.PreviewSquashAsync(migrationName);
+                await migrationSquasher.PreviewSquashAsync(migrationName, optimize);
             }
             else
             {
-                await migrationSquasher.SquashMigrationsAsync(migrationName);
+                await migrationSquasher.SquashMigrationsAsync(migrationName, optimize);
             }
 
             return 0;

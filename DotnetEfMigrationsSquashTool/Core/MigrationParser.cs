@@ -14,9 +14,9 @@ public class ParsedMigration
     public required string FileName { get; init; }
     public required string MigrationId { get; init; }
     public required string ClassName { get; init; }
-    public string? UpBody { get; init; }
+    public string? UpBody { get; set; }
     public bool UpHasReturnStatement { get; init; }
-    public string? DownBody { get; init; }
+    public string? DownBody { get; set; }
     public bool DownHasReturnStatement { get; init; }
     public List<string> Usings { get; init; } = new();
     public List<string> ExtraMembers { get; init; } = new();

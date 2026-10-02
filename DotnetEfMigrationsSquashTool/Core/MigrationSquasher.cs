@@ -23,7 +23,7 @@ public class MigrationSquasher
         _migrationsFolder = Path.GetFullPath(migrationsFolder);
     }
 
-    public async Task PreviewSquashAsync(string newMigrationName)
+    public async Task PreviewSquashAsync(string newMigrationName, bool optimize = false)
     {
         var migrations = GetExistingMigrationFiles();
 
@@ -43,12 +43,24 @@ public class MigrationSquasher
             Console.WriteLine($"  • {Path.GetFileName(file)}");
         }
 
+        if (optimize && migrations.Count > 0)
+        {
+            var parsedMigrations = new List<ParsedMigration>();
+            foreach (var file in migrations)
+            {
+                var code = await File.ReadAllTextAsync(file);
+                parsedMigrations.Add(MigrationParser.ParseMigration(code, file));
+            }
+            var optResult = OperationOptimizer.Optimize(parsedMigrations);
+            PrintOptimizationReport(optResult);
+        }
+
         Console.WriteLine("\n💡 To actually perform the squash, run without --dry-run");
         Console.WriteLine("⚠️  Make sure to backup your project first!");
         await Task.CompletedTask;
     }
 
-    public async Task SquashMigrationsAsync(string migrationName)
+    public async Task SquashMigrationsAsync(string migrationName, bool optimize = false)
     {
         try
         {
@@ -88,6 +100,12 @@ public class MigrationSquasher
                 var parsed = MigrationParser.ParseMigration(code, file);
                 parsedMigrations.Add(parsed);
                 Console.WriteLine($"  📄 Parsed: {Path.GetFileNameWithoutExtension(file)}");
+            }
+
+            if (optimize)
+            {
+                var optResult = OperationOptimizer.Optimize(parsedMigrations);
+                PrintOptimizationReport(optResult);
             }
 
             // Step 5: Remove old migration files safely (only migration files and their designer files)
@@ -575,4 +593,25 @@ PRINT 'Your database now recognizes the consolidated migration: {migrationName}'
 
         Console.WriteLine($"📄 Generated database update script: {Path.GetFileName(scriptFile)}");
     }
+
+    private static void PrintOptimizationReport(OptimizationResult result)
+    {
+        Console.WriteLine("\n⚡ Optimization Report:");
+        if (result.PrunedMessages.Count == 0 && result.RetainedMessages.Count == 0)
+        {
+            Console.WriteLine("  • No redundant operations found to prune.");
+            return;
+        }
+
+        foreach (var msg in result.PrunedMessages)
+        {
+            Console.WriteLine($"  ✅ {msg}");
+        }
+
+        foreach (var msg in result.RetainedMessages)
+        {
+            Console.WriteLine($"  🛡️  {msg}");
+        }
+    }
 }
+
