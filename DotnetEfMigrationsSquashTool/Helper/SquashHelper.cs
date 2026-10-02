@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
 
@@ -9,9 +10,10 @@ public static class SquashHelper
         string projectPath,
         string contextName,
         string? migrationRoot,
-        string migrationName,
+        string? migrationName,
         bool dryRun,
-        bool optimize = false)
+        bool optimize = false,
+        bool updateDatabase = false)
     {
         try
         {
@@ -72,7 +74,7 @@ public static class SquashHelper
                 return 1;
             }
 
-            if (!Regex.IsMatch(migrationName, @"^[_\p{L}][\p{L}\p{Nd}_]*$"))
+            if (!string.IsNullOrWhiteSpace(migrationName) && !Regex.IsMatch(migrationName, @"^[_\p{L}][\p{L}\p{Nd}_]*$"))
             {
                 Console.WriteLine($"❌ Invalid migration name: {migrationName}");
                 Console.WriteLine("   Use a valid C# identifier, for example: ConsolidatedMigration");
@@ -81,6 +83,33 @@ public static class SquashHelper
 
             Console.WriteLine("✅ Project and migrations directory verified!");
             Console.WriteLine($"📁 Migrations folder: {migrationsFolder}");
+
+            if (updateDatabase && !dryRun)
+            {
+                Console.WriteLine($"🔄 Running 'dotnet ef database update' for {contextName}...");
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "dotnet",
+                    Arguments = $"ef database update --project \"{projectPath}\" --context \"{contextName}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false
+                };
+                using var proc = Process.Start(psi);
+                if (proc != null)
+                {
+                    var output = await proc.StandardOutput.ReadToEndAsync();
+                    var error = await proc.StandardError.ReadToEndAsync();
+                    await proc.WaitForExitAsync();
+                    if (proc.ExitCode != 0)
+                    {
+                        Console.WriteLine("❌ 'dotnet ef database update' failed:");
+                        Console.WriteLine(string.IsNullOrWhiteSpace(error) ? output : error);
+                        return 1;
+                    }
+                    Console.WriteLine("✅ Database updated successfully to latest migration!");
+                }
+            }
 
             var migrationSquasher = new MigrationSquasher(projectPath, contextName, migrationsFolder);
 

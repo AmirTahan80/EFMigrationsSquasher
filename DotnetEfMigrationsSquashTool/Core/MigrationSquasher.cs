@@ -23,9 +23,14 @@ public class MigrationSquasher
         _migrationsFolder = Path.GetFullPath(migrationsFolder);
     }
 
-    public async Task PreviewSquashAsync(string newMigrationName, bool optimize = false)
+    public async Task PreviewSquashAsync(string? newMigrationName, bool optimize = false)
     {
         var migrations = GetExistingMigrationFiles();
+        if (migrations.Count == 0)
+        {
+            Console.WriteLine("❌ No migrations found to squash!");
+            return;
+        }
 
         Console.WriteLine($"📋 Found {migrations.Count} existing migrations:");
         foreach (var migration in migrations)
@@ -33,10 +38,21 @@ public class MigrationSquasher
             Console.WriteLine($"  • {Path.GetFileNameWithoutExtension(migration)}");
         }
 
-        Console.WriteLine($"\n🎯 Would create new migration: {newMigrationName}");
+        bool isMergeIntoLast = string.IsNullOrWhiteSpace(newMigrationName);
+        if (isMergeIntoLast)
+        {
+            var lastMigration = Path.GetFileNameWithoutExtension(migrations.Last());
+            Console.WriteLine($"\n🎯 Target: Merge all migrations into LAST migration '{lastMigration}'");
+            Console.WriteLine("   (Preserves migration ID in __EFMigrationsHistory; zero database impact on existing DBs)");
+        }
+        else
+        {
+            Console.WriteLine($"\n🎯 Target: Create new migration '{newMigrationName}'");
+        }
+
         Console.WriteLine($"📁 Migrations folder: {_migrationsFolder}");
 
-        var filesToRemove = GetFilesToRemove();
+        var filesToRemove = GetFilesToRemove(newMigrationName);
         Console.WriteLine($"\n📄 Files that would be removed ({filesToRemove.Count}):");
         foreach (var file in filesToRemove)
         {
@@ -60,7 +76,7 @@ public class MigrationSquasher
         await Task.CompletedTask;
     }
 
-    public async Task SquashMigrationsAsync(string migrationName, bool optimize = false)
+    public async Task SquashMigrationsAsync(string? migrationName, bool optimize = false)
     {
         try
         {
@@ -76,6 +92,8 @@ public class MigrationSquasher
             }
 
             Console.WriteLine($"📋 Found {migrationFiles.Count} migrations to squash");
+
+            bool isMergeIntoLast = string.IsNullOrWhiteSpace(migrationName);
 
             // Step 2: Create backup
             await CreateBackupAsync();
@@ -108,27 +126,71 @@ public class MigrationSquasher
                 PrintOptimizationReport(optResult);
             }
 
-            // Step 5: Remove old migration files safely (only migration files and their designer files)
-            RemoveOldMigrations();
+            // Step 5: Remove old migration files safely
+            RemoveOldMigrations(migrationName);
 
-            // Step 6: Create new consolidated migration with both Up and Down
-            var migrationId = await CreateConsolidatedMigrationAsync(
-                migrationName,
+            // Step 6: Create or overwrite consolidated migration with both Up and Down
+            string targetMigrationId;
+            string targetClassName;
+
+            if (isMergeIntoLast)
+            {
+                var lastMigration = parsedMigrations.Last();
+                targetMigrationId = lastMigration.MigrationId;
+                targetClassName = lastMigration.ClassName;
+                Console.WriteLine($"📝 Merging all migrations into last migration: {targetMigrationId}");
+            }
+            else
+            {
+                var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                targetMigrationId = $"{timestamp}_{migrationName}";
+                targetClassName = migrationName!;
+                Console.WriteLine($"📝 Creating consolidated migration: {migrationName}");
+            }
+
+            var (migrationContent, designerContent) = GenerateMigrationAndDesigner(
+                targetClassName,
+                targetMigrationId,
                 parsedMigrations,
                 parsedSnapshot,
                 efCoreVersion,
                 migrationNamespace);
 
-            // Step 7: Generate database update script
-            GenerateDatabaseUpdateScript(migrationName, migrationId, efCoreVersion);
+            var migrationFile = Path.Combine(_migrationsFolder, $"{targetMigrationId}.cs");
+            await File.WriteAllTextAsync(migrationFile, migrationContent);
+            Console.WriteLine($"✅ Saved: {Path.GetFileName(migrationFile)}");
+
+            var designerFile = Path.Combine(_migrationsFolder, $"{targetMigrationId}.Designer.cs");
+            await File.WriteAllTextAsync(designerFile, designerContent);
+            Console.WriteLine($"✅ Saved: {Path.GetFileName(designerFile)}");
+
+            // Step 7: Generate database update / cleanup script
+            if (isMergeIntoLast)
+            {
+                var earlierMigrations = parsedMigrations.Take(parsedMigrations.Count - 1).ToList();
+                GenerateHistoryCleanupScript(targetMigrationId, earlierMigrations, efCoreVersion);
+            }
+            else
+            {
+                GenerateDatabaseUpdateScript(migrationName!, targetMigrationId, efCoreVersion);
+            }
 
             Console.WriteLine();
             Console.WriteLine("✅ Migration squash completed successfully!");
             Console.WriteLine();
             Console.WriteLine("📋 Next steps:");
-            Console.WriteLine("1. Review the generated consolidated migration");
-            Console.WriteLine("2. Update existing databases using the generated SQL script");
-            Console.WriteLine("3. Test thoroughly before deploying to production");
+            if (isMergeIntoLast)
+            {
+                Console.WriteLine("1. Review the merged migration");
+                Console.WriteLine("2. Existing databases already recognize this migration (zero DB changes will be applied)");
+                Console.WriteLine("3. Optionally run the SQL script to clean up folded-away migration IDs from __EFMigrationsHistory");
+            }
+            else
+            {
+                Console.WriteLine("1. Review the generated consolidated migration");
+                Console.WriteLine("2. Update existing databases using the generated SQL script");
+                Console.WriteLine("3. Test thoroughly before deploying to production");
+            }
             Console.WriteLine();
             Console.WriteLine($"📄 SQL script generated: {Path.Combine(_migrationsFolder, "UpdateExistingDatabases.sql")}");
         }
@@ -153,12 +215,18 @@ public class MigrationSquasher
             .ToList();
     }
 
-    public List<string> GetFilesToRemove()
+    public List<string> GetFilesToRemove(string? newMigrationName = null)
     {
         var migrationFiles = GetExistingMigrationFiles();
         var filesToRemove = new List<string>();
 
-        foreach (var migrationFile in migrationFiles)
+        // If merging into last migration, keep the last migration file (it will be overwritten)
+        bool isMergeIntoLast = string.IsNullOrWhiteSpace(newMigrationName);
+        var filesToProcess = isMergeIntoLast && migrationFiles.Count > 0
+            ? migrationFiles.Take(migrationFiles.Count - 1).ToList()
+            : migrationFiles;
+
+        foreach (var migrationFile in filesToProcess)
         {
             filesToRemove.Add(migrationFile);
 
@@ -225,11 +293,11 @@ public class MigrationSquasher
         return (string.Empty, null);
     }
 
-    private void RemoveOldMigrations()
+    private void RemoveOldMigrations(string? newMigrationName = null)
     {
         Console.WriteLine("🗑️  Removing old migration files...");
 
-        var filesToRemove = GetFilesToRemove();
+        var filesToRemove = GetFilesToRemove(newMigrationName);
         foreach (var file in filesToRemove)
         {
             Console.WriteLine($"   Removing: {Path.GetFileName(file)}");
@@ -239,40 +307,9 @@ public class MigrationSquasher
         Console.WriteLine($"✅ Removed {filesToRemove.Count} migration files (preserved custom code and snapshots)");
     }
 
-    private async Task<string> CreateConsolidatedMigrationAsync(
-        string migrationName,
-        List<ParsedMigration> parsedMigrations,
-        ParsedModelSnapshot parsedSnapshot,
-        string efCoreVersion,
-        string migrationNamespace)
-    {
-        Console.WriteLine($"📝 Creating consolidated migration: {migrationName}");
-
-        var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
-        var className = $"{timestamp}_{migrationName}";
-
-        var (migrationContent, designerContent) = GenerateMigrationAndDesigner(
-            migrationName,
-            className,
-            parsedMigrations,
-            parsedSnapshot,
-            efCoreVersion,
-            migrationNamespace);
-
-        var migrationFile = Path.Combine(_migrationsFolder, $"{className}.cs");
-        await File.WriteAllTextAsync(migrationFile, migrationContent);
-        Console.WriteLine($"✅ Created: {Path.GetFileName(migrationFile)}");
-
-        var designerFile = Path.Combine(_migrationsFolder, $"{className}.Designer.cs");
-        await File.WriteAllTextAsync(designerFile, designerContent);
-        Console.WriteLine($"✅ Created: {Path.GetFileName(designerFile)}");
-
-        return className;
-    }
-
     public (string MigrationContent, string DesignerContent) GenerateMigrationAndDesigner(
-        string migrationName,
-        string className,
+        string targetClassName,
+        string targetMigrationId,
         List<ParsedMigration> parsedMigrations,
         ParsedModelSnapshot parsedSnapshot,
         string efCoreVersion,
@@ -426,7 +463,7 @@ public class MigrationSquasher
 namespace {migrationNamespace}
 {{
     /// <inheritdoc />
-    public partial class {migrationName} : Migration
+    public partial class {targetClassName} : Migration
     {{
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -483,8 +520,8 @@ namespace {migrationNamespace}
 namespace {migrationNamespace}
 {{
     [DbContext(typeof({_contextName}))]
-    [Migration(""{className}"")]
-    partial class {migrationName}
+    [Migration(""{targetMigrationId}"")]
+    partial class {targetClassName}
     {{
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -502,6 +539,70 @@ namespace {migrationNamespace}
         var indent = new string(' ', spaces);
         var lines = code.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
         return string.Join(Environment.NewLine, lines.Select(line => string.IsNullOrWhiteSpace(line) ? string.Empty : $"{indent}{line.TrimEnd()}"));
+    }
+
+    private void GenerateHistoryCleanupScript(string keptMigrationId, List<ParsedMigration> removedMigrations, string efCoreVersion)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("-- ===============================================");
+        sb.AppendLine("-- EF Core Migration Merge - History Cleanup Script");
+        sb.AppendLine($"-- Generated: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+        sb.AppendLine($"-- Kept migration (already applied): {keptMigrationId}");
+        sb.AppendLine("-- Author: AmirTahan80");
+        sb.AppendLine("-- ===============================================");
+        sb.AppendLine("--");
+        sb.AppendLine("-- This script removes older folded-away migration IDs from __EFMigrationsHistory.");
+        sb.AppendLine("-- The database schema is ALREADY UP TO DATE because the last migration ID was kept.");
+        sb.AppendLine("-- Databases that already have this migration ID will NOT re-apply any schema changes.");
+        sb.AppendLine("--");
+        sb.AppendLine("-- ⚠️  BACKUP your database before running this script.");
+        sb.AppendLine("-- ===============================================");
+        sb.AppendLine();
+        sb.AppendLine("PRINT 'Starting EF Core migration history cleanup...';");
+        sb.AppendLine();
+        sb.AppendLine("-- Step 1: Review current history");
+        sb.AppendLine("SELECT MigrationId, ProductVersion FROM __EFMigrationsHistory ORDER BY MigrationId;");
+        sb.AppendLine();
+
+        if (removedMigrations.Count > 0)
+        {
+            sb.AppendLine("-- Step 2: Remove the folded-away migration IDs (the kept migration stays).");
+            sb.AppendLine("-- Uncomment after backup:");
+            sb.AppendLine("-- DELETE FROM __EFMigrationsHistory");
+            sb.AppendLine("-- WHERE MigrationId IN (");
+            for (int i = 0; i < removedMigrations.Count; i++)
+            {
+                var comma = i < removedMigrations.Count - 1 ? "," : "";
+                sb.AppendLine($"--   '{removedMigrations[i].MigrationId}'{comma}");
+            }
+            sb.AppendLine("-- );");
+            sb.AppendLine();
+        }
+        else
+        {
+            sb.AppendLine("-- Nothing to remove: only one migration existed.");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("-- Step 3: Verify (the kept migration should remain)");
+        sb.AppendLine("SELECT MigrationId, ProductVersion FROM __EFMigrationsHistory ORDER BY MigrationId;");
+        sb.AppendLine();
+        sb.AppendLine("PRINT 'History cleanup completed. Schema unchanged.';");
+        sb.AppendLine();
+        sb.AppendLine("-- ===============================================");
+        sb.AppendLine("-- NON-SQL SERVER PROVIDERS (PostgreSQL, SQLite, MySQL)");
+        sb.AppendLine("-- ===============================================");
+        if (removedMigrations.Count > 0)
+        {
+            var idList = string.Join(", ", removedMigrations.Select(m => $"'{m.MigrationId}'"));
+            sb.AppendLine($"-- PostgreSQL / SQLite: DELETE FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" IN ({idList});");
+            sb.AppendLine($"-- MySQL / MariaDB:    DELETE FROM `__EFMigrationsHistory` WHERE `MigrationId` IN ({idList});");
+        }
+        sb.AppendLine("-- ===============================================");
+
+        var scriptFile = Path.Combine(_migrationsFolder, "UpdateExistingDatabases.sql");
+        File.WriteAllText(scriptFile, sb.ToString());
+        Console.WriteLine($"📄 Generated history cleanup script: {Path.GetFileName(scriptFile)}");
     }
 
     private void GenerateDatabaseUpdateScript(string migrationName, string migrationId, string efCoreVersion)
@@ -614,4 +715,3 @@ PRINT 'Your database now recognizes the consolidated migration: {migrationName}'
         }
     }
 }
-

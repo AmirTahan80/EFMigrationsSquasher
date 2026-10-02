@@ -70,9 +70,10 @@ ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbCo
 | `--project` | Yes | Path to the target `.csproj` file. |
 | `--context` | Yes | `DbContext` class name used by the generated designer. |
 | `--migration-root` | No | Directory containing the `Migrations` folder (defaults to `--project` directory). |
-| `--name` | No | New migration class name. Defaults to `ConsolidatedMigration`. |
+| `--name` | No | Migration name. If omitted, merges into the **LAST existing migration** (preserving its ID so existing databases require zero updates). |
 | `--dry-run` | No | Shows what would change without writing or deleting files. |
 | `--optimize` | No | Safely prunes redundant operations (e.g. tables and columns created and subsequently dropped without raw SQL dependencies). |
+| `--update-database` | No | Runs `dotnet ef database update` before merging migrations. |
 | `--help` | No | Displays CLI help. |
 
 For this layout:

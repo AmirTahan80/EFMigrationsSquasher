@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Roslyn AST-based C# parsing (`Microsoft.CodeAnalysis.CSharp`) replacing fragile regex and brace-counter string logic.
 - Automated xUnit test suite (`DotnetEfMigrationsSquashTool.Tests`) covering migration parsing, down synthesis, file filtering, and return-statement isolation.
 - Automatic preservation of helper methods, constants, and custom class members from original migrations into the consolidated migration.
+- Merging migrations into the LAST existing migration by default (preserving its migration ID, timestamp, and name), ensuring databases that already ran migrations require zero schema changes and no manual SQL updates.
+- Optional '--update-database' flag to run 'dotnet ef database update' before merging.
 - Safe execution isolation for migration bodies containing early `return;` statements.
 - Safe redundant operation pruning with `--optimize` flag, automatically removing tables, columns, and indexes that were created and subsequently dropped while guarding against raw SQL references and foreign key constraints.
 - Multi-database guidance and script templates for PostgreSQL, SQLite, and MySQL in `UpdateExistingDatabases.sql`.
