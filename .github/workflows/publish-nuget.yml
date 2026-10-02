@@ -40,6 +40,9 @@ jobs:
       - name: Build
         run: dotnet build DotnetEfMigrationsSquashTool.sln --configuration Release --no-restore
 
+      - name: Test
+        run: dotnet test DotnetEfMigrationsSquashTool.sln --configuration Release --no-build
+
       - name: Pack
         run: >-
           dotnet pack DotnetEfMigrationsSquashTool/DotnetEfMigrationsSquashTool.csproj

@@ -1,4 +1,4 @@
-﻿using System.CommandLine;
+using System.CommandLine;
 
 namespace EfMigrationSquasher
 {
@@ -11,7 +11,7 @@ namespace EfMigrationSquasher
             // Simpler option definitions
             var projectOption = new Option<string>("--project") { Required = true };
             var contextOption = new Option<string>("--context") { Required = true };
-            var migrationOption = new Option<string>("--migration-root") { Required = true };
+            var migrationOption = new Option<string?>("--migration-root") { Required = false };
             var nameOption = new Option<string>("--name")
             {
                 DefaultValueFactory = (s) => "ConsolidatedMigration"
@@ -26,7 +26,7 @@ namespace EfMigrationSquasher
             contextOption.Description = "DbContext class name";
             nameOption.Description = "Name for the new consolidated migration";
             dryRunOption.Description = "Show what would be done without making changes";
-            migrationOption.Description = "Directory containing the Migrations folder";
+            migrationOption.Description = "Directory containing the Migrations folder or project (defaults to project directory)";
 
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(contextOption);

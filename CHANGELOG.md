@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Roslyn AST-based C# parsing (`Microsoft.CodeAnalysis.CSharp`) replacing fragile regex and brace-counter string logic.
+- Automated xUnit test suite (`DotnetEfMigrationsSquashTool.Tests`) covering migration parsing, down synthesis, file filtering, and return-statement isolation.
+- Automatic preservation of helper methods, constants, and custom class members from original migrations into the consolidated migration.
+- Safe execution isolation for migration bodies containing early `return;` statements.
+- Multi-database guidance and script templates for PostgreSQL, SQLite, and MySQL in `UpdateExistingDatabases.sql`.
+
+### Changed
+- Made `--migration-root` optional, automatically discovering the `Migrations/` directory from `--project`.
+- Added test execution to the GitHub Actions NuGet publishing workflow.
+
+### Fixed
+- Prevented accidental deletion of non-migration `.cs` files (helpers, custom classes, enums) during migration cleanup.
+- Eliminated syntax errors in synthesized `Down` methods (fixed invalid `DropIndex` missing table, invalid `CreateIndex`, and hardcoded `nvarchar(max)` string conversions).
+- Fixed parsing corruption caused by curly braces inside SQL string literals, interpolated strings, raw strings, or comments.
+- Improved model snapshot resolution to correctly match `--context` when multiple snapshots are present.
+
 ## [1.1.0] - 2026-07-14
 
 ### Changed
