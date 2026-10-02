@@ -69,9 +69,10 @@ ef-migrations-squash --project "./MyApp/MyApp.csproj" --context "ApplicationDbCo
 | --- | --- | --- |
 | `--project` | Yes | Path to the target `.csproj` file. |
 | `--context` | Yes | `DbContext` class name used by the generated designer. |
-| `--migration-root` | Yes | Directory that directly contains the `Migrations` folder. |
+| `--migration-root` | No | Directory containing the `Migrations` folder (defaults to `--project` directory). |
 | `--name` | No | New migration class name. Defaults to `ConsolidatedMigration`. |
 | `--dry-run` | No | Shows what would change without writing or deleting files. |
+| `--optimize` | No | Safely prunes redundant operations (e.g. tables and columns created and subsequently dropped without raw SQL dependencies). |
 | `--help` | No | Displays CLI help. |
 
 For this layout:
@@ -158,6 +159,22 @@ Never run the existing-database history script on an empty database.
 Some migrations contain more than `migrationBuilder` operations. They may instantiate a `DbContext`, query data, call external code, or save changes.
 
 The squasher preserves that C# code and its imports, but you must review it carefully. Applying the consolidated migration or generating an EF SQL script can execute migration code and may open configured database connections.
+
+## Redundant operation pruning (`--optimize`)
+
+Over time, projects accumulate migrations that create temporary tables, add columns, or create indexes that are later dropped in subsequent migrations.
+
+By passing `--optimize`, the squasher analyzes the operation graph and prunes redundant pairs:
+- **Redundant Tables**: Tables created and subsequently dropped are removed from the consolidated migration.
+- **Redundant Columns**: Columns added to surviving tables and subsequently dropped are removed.
+- **Redundant Indexes**: Indexes created and subsequently dropped are removed.
+
+### Safety Guards
+The optimizer performs safety checks before pruning any operation:
+- **Raw SQL Check**: If any migration contains `migrationBuilder.Sql(...)` referencing the dropped table or column, it is **automatically retained** to prevent runtime failures in data migration scripts.
+- **Foreign Key Check**: If any surviving table references the dropped table, it is retained.
+
+Run with `--optimize --dry-run` to preview the optimization report without modifying any files.
 
 ## Recovery
 

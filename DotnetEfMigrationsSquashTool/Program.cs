@@ -1,4 +1,4 @@
-﻿using System.CommandLine;
+using System.CommandLine;
 
 namespace EfMigrationSquasher
 {
@@ -11,12 +11,16 @@ namespace EfMigrationSquasher
             // Simpler option definitions
             var projectOption = new Option<string>("--project") { Required = true };
             var contextOption = new Option<string>("--context") { Required = true };
-            var migrationOption = new Option<string>("--migration-root") { Required = true };
+            var migrationOption = new Option<string?>("--migration-root") { Required = false };
             var nameOption = new Option<string>("--name")
             {
                 DefaultValueFactory = (s) => "ConsolidatedMigration"
             };
             var dryRunOption = new Option<bool>("--dry-run")
+            {
+                DefaultValueFactory = (s) => false
+            };
+            var optimizeOption = new Option<bool>("--optimize")
             {
                 DefaultValueFactory = (s) => false
             };
@@ -26,12 +30,14 @@ namespace EfMigrationSquasher
             contextOption.Description = "DbContext class name";
             nameOption.Description = "Name for the new consolidated migration";
             dryRunOption.Description = "Show what would be done without making changes";
-            migrationOption.Description = "Directory containing the Migrations folder";
+            optimizeOption.Description = "Safely prune redundant operations (e.g. tables and columns created and subsequently dropped without raw SQL dependencies)";
+            migrationOption.Description = "Directory containing the Migrations folder or project (defaults to project directory)";
 
             rootCommand.Options.Add(projectOption);
             rootCommand.Options.Add(contextOption);
             rootCommand.Options.Add(nameOption);
             rootCommand.Options.Add(dryRunOption);
+            rootCommand.Options.Add(optimizeOption);
             rootCommand.Options.Add(migrationOption);
 
             rootCommand.SetAction(async (parseResult) =>
@@ -40,9 +46,10 @@ namespace EfMigrationSquasher
                 var context = parseResult.GetValue(contextOption);
                 var name = parseResult.GetValue(nameOption);
                 var dryRun = parseResult.GetValue(dryRunOption);
+                var optimize = parseResult.GetValue(optimizeOption);
                 var migration = parseResult.GetValue(migrationOption);
 
-                return await SquashHelper.SquashMigrationsAsync(project!, context!, migration!, name!, dryRun);
+                return await SquashHelper.SquashMigrationsAsync(project!, context!, migration!, name!, dryRun, optimize);
             });
 
             ParseResult parseResult = rootCommand.Parse(args);
